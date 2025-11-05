@@ -26,6 +26,8 @@ This bot can be deployed to Render for free. Render supports long-running proces
    - Click "Environment" tab
    - Add: `TELEGRAM_BOT_TOKEN` = `your_bot_token_here` (from BotFather)
    - Add: `ADMIN_CHAT_ID` = `your_chat_id_here` (optional, for admin notifications)
+   - **Optional**: `ENABLE_KEEP_ALIVE` = `true` (default, keeps service alive on free tier)
+   - **Note**: Render automatically sets `RENDER_EXTERNAL_URL` for you
 
 5. **Deploy**
    - Click "Create Web Service"
@@ -48,11 +50,16 @@ If you have `render.yaml` in your repo:
 
 ## Important Notes
 
-- **Free Tier**: Render's free tier spins down after 15 minutes of inactivity. For always-on bots, consider the paid tier ($7/month) or use a service like Railway, Fly.io, or Heroku.
+- **Free Tier**: Render's free tier spins down after 15 minutes of inactivity. The bot includes a built-in keep-alive mechanism that pings itself every 10 minutes to prevent spin-down.
+
+- **Keep-Alive Options**:
+  1. **Built-in (Automatic)**: The bot automatically pings itself every 10 minutes (enabled by default)
+  2. **External Service**: Use a free service like [UptimeRobot](https://uptimerobot.com) or [Cron-job.org](https://cron-job.org) to ping your bot's health endpoint every 5-10 minutes
+  3. **Upgrade**: For guaranteed 24/7 uptime, upgrade to Render's paid tier ($7/month)
 
 - **Data Persistence**: User preferences and price history are stored in `users.json` and `prices.json`. On Render's free tier, these files persist but may be lost if the service is inactive for too long. For production, consider using a database.
 
-- **Health Checks**: The bot includes a health check endpoint at `/health` to keep the service alive on Render.
+- **Health Checks**: The bot includes a health check endpoint at `/health`. You can also use the root endpoint `/` for monitoring.
 
 ## Alternative Hosting Options
 

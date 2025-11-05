@@ -122,6 +122,7 @@ This bot can be deployed to Render (or similar services) for free. See [DEPLOY.m
 - The bot automatically handles users who block it or delete the chat
 - For production use, deploy to Render, Railway, or similar services (see DEPLOY.md)
 - Includes health check endpoint for hosting platforms
+- **Built-in keep-alive**: Automatically prevents free tier spin-down (see KEEP_ALIVE.md)
 
 ## Troubleshooting
 

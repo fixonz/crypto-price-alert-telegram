@@ -573,6 +573,38 @@ app.listen(PORT, () => {
   console.log(`Health check server running on port ${PORT}`);
 });
 
+// Keep-alive mechanism for free tier hosting (prevents spin-down)
+const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL || `http://localhost:${PORT}/health`;
+const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000; // 10 minutes (free tier spins down after 15 min)
+
+// Self-ping function to keep service alive
+async function keepAlive() {
+  try {
+    const response = await axios.get(KEEP_ALIVE_URL, { timeout: 5000 });
+    console.log(`Keep-alive ping successful: ${response.status}`);
+  } catch (error) {
+    // If localhost doesn't work (e.g., on Render), try the public URL
+    if (KEEP_ALIVE_URL.includes('localhost') && process.env.RENDER_EXTERNAL_URL) {
+      try {
+        await axios.get(`${process.env.RENDER_EXTERNAL_URL}/health`, { timeout: 5000 });
+        console.log('Keep-alive ping successful (external URL)');
+      } catch (err) {
+        console.log('Keep-alive ping failed (will retry)');
+      }
+    } else {
+      console.log('Keep-alive ping failed (will retry)');
+    }
+  }
+}
+
+// Start keep-alive ping every 10 minutes
+if (process.env.ENABLE_KEEP_ALIVE !== 'false') {
+  setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
+  // Initial ping after 30 seconds (to let server start)
+  setTimeout(keepAlive, 30000);
+  console.log('Keep-alive mechanism enabled (pinging every 10 minutes)');
+}
+
 // Start bot
 console.log('Bot started! Waiting for commands...');
 initializeSchedules();
