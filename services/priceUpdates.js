@@ -141,58 +141,27 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
     });
   }
 
-  // Calculate 5-minute price change for direction emoji
-  // Use pump.fun market activity 5m priceChangePercent if available (most accurate)
-  let directionEmoji = '🟢'; // Default to green
-  let change5m = 0;
+  // Calculate direction emoji based on 24h change (always fresh and accurate)
+  // This is the primary source since priceData.change24h is always up-to-date
+  const change24h = parseFloat(priceData.change24h);
+  let directionEmoji = change24h >= 0 ? '🟢' : '🔴';
   
-  if (currentTokenInfo && currentTokenInfo.transactions && currentTokenInfo.transactions.m5) {
-    // Use 5m priceChangePercent from pump.fun (most accurate)
-    const m5Change = currentTokenInfo.transactions.m5.priceChangePercent;
-    if (typeof m5Change === 'number' && !isNaN(m5Change)) {
-      change5m = m5Change;
-      directionEmoji = change5m >= 0 ? '🟢' : '🔴';
-    }
-  } else {
-    // Fallback: calculate from price history if pump.fun data not available
-    const priceHistory = await loadPriceHistory();
-    const historyKey = `solana_${tokenAddress}`;
-    const currentPrice = parseFloat(priceData.price);
-    const now = Date.now();
-    const fiveMinutesAgo = now - (5 * 60 * 1000);
-    
-    // Find price from 5 minutes ago (or closest)
-    let price5mAgo = null;
-    if (priceHistory[historyKey] && priceHistory[historyKey].history) {
-      // Find the closest price point to 5 minutes ago
-      const history = priceHistory[historyKey].history;
-      for (let i = history.length - 1; i >= 0; i--) {
-        if (history[i].timestamp <= fiveMinutesAgo) {
-          price5mAgo = history[i].price;
-          break;
-        }
+  // Try to get fresh 5m data for better short-term direction (optional enhancement)
+  let change5m = 0;
+  try {
+    const { getSolanaTokenInfo } = require('../utils/api');
+    const freshTokenInfo = await getSolanaTokenInfo(tokenAddress);
+    if (freshTokenInfo && freshTokenInfo.transactions && freshTokenInfo.transactions.m5) {
+      const m5Change = freshTokenInfo.transactions.m5.priceChangePercent;
+      if (typeof m5Change === 'number' && !isNaN(m5Change)) {
+        change5m = m5Change;
+        // Use 5m change for emoji if available (more recent indicator)
+        directionEmoji = change5m >= 0 ? '🟢' : '🔴';
       }
     }
-    
-    // If no 5m history, use last known price (if available)
-    if (!price5mAgo && priceHistory[historyKey] && priceHistory[historyKey].price) {
-      const lastPrice = priceHistory[historyKey].price;
-      const lastTimestamp = priceHistory[historyKey].timestamp || 0;
-      // Only use if it's within reasonable time (less than 10 minutes old)
-      if (now - lastTimestamp < 10 * 60 * 1000) {
-        price5mAgo = lastPrice;
-      }
-    }
-    
-    // Calculate 5m change percentage
-    if (price5mAgo && price5mAgo > 0) {
-      change5m = ((currentPrice - price5mAgo) / price5mAgo) * 100;
-      directionEmoji = change5m >= 0 ? '🟢' : '🔴';
-    } else {
-      // Final fallback to 24h change if no 5m history
-      const change24h = parseFloat(priceData.change24h);
-      directionEmoji = change24h >= 0 ? '🟢' : '🔴';
-    }
+  } catch (error) {
+    // If fetching fresh data fails, stick with 24h change (already set above)
+    console.log(`Could not fetch fresh transaction data for ${tokenAddress}, using 24h change for emoji`);
   }
   
   // Update price history with current price (for future calculations)
@@ -229,7 +198,7 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
   priceHistory[historyKey].timestamp = now;
   await savePriceHistory(priceHistory);
   
-  const change24h = parseFloat(priceData.change24h);
+  // change24h already declared above, reuse it
   const arrowEmoji = change24h >= 0 ? '📈' : '📉';
   
   const athensTime = new Intl.DateTimeFormat('en-US', {

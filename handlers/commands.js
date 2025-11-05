@@ -1,6 +1,6 @@
 const { TOKENS, VALID_INTERVALS } = require('../config/tokens');
 const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUserCount, getActiveUserCount, setTempFlag, getTempFlag, clearTempFlag } = require('../utils/storage');
-const { getSolanaTokenInfo } = require('../utils/api');
+const { getSolanaTokenInfo, getTokenPrice } = require('../utils/api');
 const { scheduleUserUpdates } = require('../services/scheduler');
 const { notifyAdminNewUser } = require('./admin');
 
@@ -27,9 +27,9 @@ async function handleStart(bot, msg) {
   }
 
   // Build status message
-  let statusMessage = `👋 <b>Welcome to Crypto Price Bot!</b>\n\n`;
+  let statusMessage = ``;
   
-  // Show tracked tokens with custom LIVE emojis
+  // Show tracked tokens
   const standardTokens = prefs.tokens || [];
   const customTokens = prefs.customTokens || [];
   
@@ -37,27 +37,31 @@ async function handleStart(bot, msg) {
     statusMessage += `📊 <b>Your Tracking Status</b>\n\n`;
     statusMessage += `🔸 <b>No tokens tracked yet</b>\n`;
   } else {
-    // Custom emojis for "LIV" - will be added via entities
-    // Need 6 placeholder characters (each emoji is 2 UTF-16 code units)
-    statusMessage += `Tracking 🟥🟥🟥:\n\n`;
+    statusMessage += `Tracking tokens:\n\n`;
+    
+    // Build token list for code/quote view
+    let tokenList = [];
     
     if (standardTokens.length > 0) {
-      statusMessage += `<b>Main Tokens:</b>\n`;
       standardTokens.forEach(tokenKey => {
         const tokenInfo = TOKENS[tokenKey];
         if (tokenInfo) {
-          statusMessage += `  ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol.toUpperCase()})\n`;
+          const emojiDisplay = tokenInfo.emoji ? `${tokenInfo.emoji} ` : '';
+          tokenList.push(`${emojiDisplay}${tokenInfo.name} ($${tokenInfo.symbol.toUpperCase()})`);
         }
       });
     }
     
     if (customTokens.length > 0) {
-      if (standardTokens.length > 0) statusMessage += `\n`;
-      statusMessage += `<b>Solana Tokens:</b>\n`;
       customTokens.forEach(ct => {
         const symbolUpper = (ct.symbol || 'Unknown').toUpperCase();
-        statusMessage += `  ${symbolUpper} ($${symbolUpper})\n`;
+        tokenList.push(`${symbolUpper} ($${symbolUpper})`);
       });
+    }
+    
+    // Display tokens in code block format
+    if (tokenList.length > 0) {
+      statusMessage += `<code>${tokenList.join('\n')}</code>\n`;
     }
   }
 
@@ -82,48 +86,8 @@ async function handleStart(bot, msg) {
     ]
   };
 
-  // Prepare custom emoji entities for "LIV"
-  // Entities use UTF-16 code unit offsets (each emoji is 2 UTF-16 code units)
-  let entities = [];
-  if (standardTokens.length > 0 || customTokens.length > 0) {
-    // Find position of "Tracking 🟥🟥🟥:" in the message
-    const trackingText = 'Tracking 🟥🟥🟥:';
-    const trackingIndex = statusMessage.indexOf(trackingText);
-    
-    if (trackingIndex !== -1) {
-      // Calculate UTF-16 offset for "Tracking " (9 characters = 9 UTF-16 code units)
-      // Then add the emoji positions
-      const prefix = 'Tracking ';
-      const prefixUtf16Length = prefix.length; // Regular ASCII = 1 UTF-16 code unit per char
-      
-      // Each red square emoji (🟥) is 2 UTF-16 code units
-      // L emoji (replaces first 🟥)
-      entities.push({
-        type: 'custom_emoji',
-        offset: trackingIndex + prefixUtf16Length,
-        length: 2,
-        custom_emoji_id: '5895702350248547531'
-      });
-      // I emoji (replaces second 🟥)
-      entities.push({
-        type: 'custom_emoji',
-        offset: trackingIndex + prefixUtf16Length + 2,
-        length: 2,
-        custom_emoji_id: '5895657545149715556'
-      });
-      // V emoji (replaces third 🟥)
-      entities.push({
-        type: 'custom_emoji',
-        offset: trackingIndex + prefixUtf16Length + 4,
-        length: 2,
-        custom_emoji_id: '5895565508295529026'
-      });
-    }
-  }
-  
   await bot.sendMessage(chatId, statusMessage, { 
     parse_mode: 'HTML',
-    entities: entities.length > 0 ? entities : undefined,
     reply_markup: keyboard
   });
 }
@@ -465,6 +429,80 @@ async function handleTokenAddress(bot, msg) {
   }
 }
 
+// Handle live price queries for individual tokens
+async function handleTokenPrice(bot, msg, tokenKey) {
+  const chatId = msg.chat.id;
+  const tokenInfo = TOKENS[tokenKey];
+  
+  if (!tokenInfo) {
+    await bot.sendMessage(chatId, '❌ Invalid token.');
+    return;
+  }
+  
+  try {
+    // Show loading message
+    const loadingMsg = await bot.sendMessage(chatId, '⏳ Fetching live price...');
+    
+    // Fetch price
+    const priceData = await getTokenPrice(tokenInfo.id);
+    
+    if (!priceData) {
+      await bot.editMessageText('❌ Could not fetch price. Please try again later.', {
+        chat_id: chatId,
+        message_id: loadingMsg.message_id
+      });
+      return;
+    }
+    
+    // Calculate direction emoji based on 24h change
+    const change24h = parseFloat(priceData.change24h);
+    const directionEmoji = change24h >= 0 ? '🟢' : '🔴';
+    const arrowEmoji = change24h >= 0 ? '📈' : '📉';
+    
+    // Format time
+    const now_formatted = new Date();
+    const athensTime = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Athens',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(now_formatted);
+    const utcTime = now_formatted.toUTCString().split(' ')[4];
+    
+    const emojiDisplay = tokenInfo.emoji ? `${tokenInfo.emoji} ` : '';
+    const message = `${directionEmoji} *${emojiDisplay}${tokenInfo.name} ($${tokenInfo.symbol.toUpperCase()}) @ $${priceData.price}*\n\n` +
+      `${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%\n\n` +
+      `_Updated at: Local ${athensTime} (UTC: ${utcTime})_`;
+    
+    await bot.editMessageText(message, {
+      chat_id: chatId,
+      message_id: loadingMsg.message_id,
+      parse_mode: 'Markdown'
+    });
+  } catch (error) {
+    console.error(`Error fetching price for ${tokenKey}:`, error);
+    await bot.sendMessage(chatId, '❌ An error occurred while fetching the price. Please try again.');
+  }
+}
+
+// Individual token handlers
+async function handleBTC(bot, msg) {
+  await handleTokenPrice(bot, msg, 'bitcoin');
+}
+
+async function handleETH(bot, msg) {
+  await handleTokenPrice(bot, msg, 'ethereum');
+}
+
+async function handleBNB(bot, msg) {
+  await handleTokenPrice(bot, msg, 'binancecoin');
+}
+
+async function handleSOL(bot, msg) {
+  await handleTokenPrice(bot, msg, 'solana');
+}
+
 module.exports = {
   handleStart,
   handleSelect,
@@ -474,6 +512,10 @@ module.exports = {
   handleCancel,
   handleStop,
   handleAdmin,
-  handleTokenAddress
+  handleTokenAddress,
+  handleBTC,
+  handleETH,
+  handleBNB,
+  handleSOL
 };
 

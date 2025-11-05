@@ -14,7 +14,11 @@ const {
   handleCancel,
   handleStop,
   handleAdmin,
-  handleTokenAddress
+  handleTokenAddress,
+  handleBTC,
+  handleETH,
+  handleBNB,
+  handleSOL
 } = require('./handlers/commands');
 
 const { handleCallbackQuery } = require('./handlers/callbacks');
@@ -45,6 +49,12 @@ bot.onText(/\/addtoken/, (msg) => handleAddToken(bot, msg));
 bot.onText(/\/cancel/, (msg) => handleCancel(bot, msg));
 bot.onText(/\/stop/, (msg) => handleStop(bot, msg));
 bot.onText(/\/admin/, (msg) => handleAdmin(bot, msg));
+
+// Live price commands
+bot.onText(/\/btc$/i, (msg) => handleBTC(bot, msg));
+bot.onText(/\/eth$/i, (msg) => handleETH(bot, msg));
+bot.onText(/\/bnb$/i, (msg) => handleBNB(bot, msg));
+bot.onText(/\/sol$/i, (msg) => handleSOL(bot, msg));
 
 // Handle callback queries (inline keyboard buttons)
 bot.on('callback_query', (query) => handleCallbackQuery(bot, query));
