@@ -106,9 +106,9 @@ async function checkPriceDrops(bot) {
             : 'N/A';
           
           // Build alert message - start with format visible in message list
-          let alertMessage = `🚨 *ALERT - $${alertTokenInfo.symbol} @ ${mcapText}*\n\n` +
+          let alertMessage = `🚨 *ALERT - $${(alertTokenInfo.symbol || '').toUpperCase()} @ ${mcapText}*\n\n` +
             `⚠️ *20%+ Drop Detected!*\n\n` +
-            `🔴 *$${alertTokenInfo.symbol} @ $${priceData.price}* (was $${lastPrice.toFixed(priceData.price.includes('.') ? priceData.price.split('.')[1].length : 2)})\n` +
+            `🔴 *$${(alertTokenInfo.symbol || '').toUpperCase()} @ $${priceData.price}* (was $${lastPrice.toFixed(priceData.price.includes('.') ? priceData.price.split('.')[1].length : 2)})\n` +
             `📉 *Drop: -${dropPercentage.toFixed(2)}%*\n` +
             `${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%\n\n`;
           
@@ -139,14 +139,14 @@ async function checkPriceDrops(bot) {
             if (tx.m5) {
               const m5 = tx.m5;
               const m5Change = typeof m5.priceChangePercent === 'number' ? m5.priceChangePercent.toFixed(2) : '0.00';
-              activityLines.push(`5m:  ${m5.buys || 0}↑ / ${m5.sells || 0}↓ | $${(m5.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${m5Change >= 0 ? '+' : ''}${m5Change}%`);
+              activityLines.push(`5m:  B:${m5.buys || 0} / S:${m5.sells || 0} | $${(m5.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${m5Change >= 0 ? '+' : ''}${m5Change}%`);
             }
             
             // 6h data
             if (tx.h6) {
               const h6 = tx.h6;
               const h6Change = typeof h6.priceChangePercent === 'number' ? h6.priceChangePercent.toFixed(2) : '0.00';
-              activityLines.push(`6h:  ${h6.buys || 0}↑ / ${h6.sells || 0}↓ | $${(h6.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${h6Change >= 0 ? '+' : ''}${h6Change}%`);
+              activityLines.push(`6h:  B:${h6.buys || 0} / S:${h6.sells || 0} | $${(h6.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${h6Change >= 0 ? '+' : ''}${h6Change}%`);
             }
             
             if (activityLines.length > 0) {

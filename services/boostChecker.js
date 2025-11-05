@@ -105,7 +105,7 @@ async function notifyBoostDetected(bot, chatId, tokenAddress, tokenInfo) {
     const utcTime = now.toUTCString().split(' ')[4];
     
     const message = `🚀 *BOOST DETECTED!*\n\n` +
-      `✨ *$${tokenInfo.symbol || 'Token'}* now has a DexScreener boost!\n\n` +
+      `✨ *$${(tokenInfo.symbol || 'Token').toUpperCase()}* now has a DexScreener boost!\n\n` +
       `This means the token profile has been promoted or has an active ad/boost.\n\n` +
       `🔗 *Links:*\n` +
       `[DexScreener](https://dexscreener.com/solana/${tokenAddress}) | ` +

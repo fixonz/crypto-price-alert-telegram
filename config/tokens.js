@@ -3,7 +3,7 @@ const TOKENS = {
   bitcoin: { id: 'bitcoin', symbol: 'BTC', name: 'Bitcoin', emoji: '₿' },
   ethereum: { id: 'ethereum', symbol: 'ETH', name: 'Ethereum', emoji: 'Ξ' },
   binancecoin: { id: 'binancecoin', symbol: 'BNB', name: 'BNB', emoji: '🟡' },
-  solana: { id: 'solana', symbol: 'SOL', name: 'Solana', emoji: '◎' }
+  solana: { id: 'solana', symbol: 'SOL', name: 'Solana', emoji: '🟣' }
 };
 
 // Valid intervals (in minutes)

@@ -94,7 +94,7 @@ async function sendPriceUpdate(bot, chatId, token) {
   }).format(now_formatted);
   const utcTime = now_formatted.toUTCString().split(' ')[4];
   
-  const message = `${directionEmoji} *$${TOKENS[token].symbol} @ $${priceData.price}*
+  const message = `${directionEmoji} *$${TOKENS[token].symbol.toUpperCase()} @ $${priceData.price}*
 
 ${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%
 
@@ -247,7 +247,7 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
     : 'N/A';
   
   // Build message with market cap in header (visible in chat list) - no price, just mcap
-  let message = `${directionEmoji} *$${currentTokenInfo.symbol} @ ${mcapText}*\n\n` +
+  let message = `${directionEmoji} *$${(currentTokenInfo.symbol || '').toUpperCase()} @ ${mcapText}*\n\n` +
     `💰 *Price:* $${priceData.price}\n` +
     `${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%\n`;
   
@@ -278,14 +278,14 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
     if (tx.m5) {
       const m5 = tx.m5;
       const m5Change = typeof m5.priceChangePercent === 'number' ? m5.priceChangePercent.toFixed(2) : '0.00';
-      activityLines.push(`5m:  ${m5.buys || 0}↑ / ${m5.sells || 0}↓ | $${(m5.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${m5Change >= 0 ? '+' : ''}${m5Change}%`);
+      activityLines.push(`5m:  B:${m5.buys || 0} / S:${m5.sells || 0} | $${(m5.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${m5Change >= 0 ? '+' : ''}${m5Change}%`);
     }
     
     // 6h data
     if (tx.h6) {
       const h6 = tx.h6;
       const h6Change = typeof h6.priceChangePercent === 'number' ? h6.priceChangePercent.toFixed(2) : '0.00';
-      activityLines.push(`6h:  ${h6.buys || 0}↑ / ${h6.sells || 0}↓ | $${(h6.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${h6Change >= 0 ? '+' : ''}${h6Change}%`);
+      activityLines.push(`6h:  B:${h6.buys || 0} / S:${h6.sells || 0} | $${(h6.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${h6Change >= 0 ? '+' : ''}${h6Change}%`);
     }
     
     if (activityLines.length > 0) {

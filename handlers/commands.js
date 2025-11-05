@@ -37,17 +37,16 @@ async function handleStart(bot, msg) {
     statusMessage += `📊 <b>Your Tracking Status</b>\n\n`;
     statusMessage += `🔸 <b>No tokens tracked yet</b>\n`;
   } else {
-    // Custom emojis for "LIVE" (no spaces between them)
-    const liveEmojis = `<tg-emoji emoji-id="5895702350248547531">L</tg-emoji><tg-emoji emoji-id="5895657545149715556">I</tg-emoji><tg-emoji emoji-id="5895565508295529026">V</tg-emoji>`;
-    
-    statusMessage += `Tracking ${liveEmojis}:\n\n`;
+    // Custom emojis for "LIV" - will be added via entities
+    // Need 6 placeholder characters (each emoji is 2 UTF-16 code units)
+    statusMessage += `Tracking 🟥🟥🟥:\n\n`;
     
     if (standardTokens.length > 0) {
       statusMessage += `<b>Main Tokens:</b>\n`;
       standardTokens.forEach(tokenKey => {
         const tokenInfo = TOKENS[tokenKey];
         if (tokenInfo) {
-          statusMessage += `  ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol})\n`;
+          statusMessage += `  ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol.toUpperCase()})\n`;
         }
       });
     }
@@ -56,7 +55,8 @@ async function handleStart(bot, msg) {
       if (standardTokens.length > 0) statusMessage += `\n`;
       statusMessage += `<b>Solana Tokens:</b>\n`;
       customTokens.forEach(ct => {
-        statusMessage += `  $${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)\n`;
+        const symbolUpper = (ct.symbol || 'Unknown').toUpperCase();
+        statusMessage += `  ${symbolUpper} ($${symbolUpper})\n`;
       });
     }
   }
@@ -82,8 +82,48 @@ async function handleStart(bot, msg) {
     ]
   };
 
+  // Prepare custom emoji entities for "LIV"
+  // Entities use UTF-16 code unit offsets (each emoji is 2 UTF-16 code units)
+  let entities = [];
+  if (standardTokens.length > 0 || customTokens.length > 0) {
+    // Find position of "Tracking 🟥🟥🟥:" in the message
+    const trackingText = 'Tracking 🟥🟥🟥:';
+    const trackingIndex = statusMessage.indexOf(trackingText);
+    
+    if (trackingIndex !== -1) {
+      // Calculate UTF-16 offset for "Tracking " (9 characters = 9 UTF-16 code units)
+      // Then add the emoji positions
+      const prefix = 'Tracking ';
+      const prefixUtf16Length = prefix.length; // Regular ASCII = 1 UTF-16 code unit per char
+      
+      // Each red square emoji (🟥) is 2 UTF-16 code units
+      // L emoji (replaces first 🟥)
+      entities.push({
+        type: 'custom_emoji',
+        offset: trackingIndex + prefixUtf16Length,
+        length: 2,
+        custom_emoji_id: '5895702350248547531'
+      });
+      // I emoji (replaces second 🟥)
+      entities.push({
+        type: 'custom_emoji',
+        offset: trackingIndex + prefixUtf16Length + 2,
+        length: 2,
+        custom_emoji_id: '5895657545149715556'
+      });
+      // V emoji (replaces third 🟥)
+      entities.push({
+        type: 'custom_emoji',
+        offset: trackingIndex + prefixUtf16Length + 4,
+        length: 2,
+        custom_emoji_id: '5895565508295529026'
+      });
+    }
+  }
+  
   await bot.sendMessage(chatId, statusMessage, { 
-    parse_mode: 'HTML', // Use HTML for custom emojis
+    parse_mode: 'HTML',
+    entities: entities.length > 0 ? entities : undefined,
     reply_markup: keyboard
   });
 }
@@ -104,7 +144,7 @@ async function handleSelect(bot, msg) {
       const isSelected = prefs.tokens.includes(token);
       const isDisabled = !isSelected && hasMainToken;
       return [{
-        text: `${isSelected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tokenInfo.name} ($${tokenInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
+        text: `${isSelected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tokenInfo.name} ($${tokenInfo.symbol.toUpperCase()})${isDisabled ? ' (Limit: 1)' : ''}`,
         callback_data: isDisabled ? 'disabled' : `toggle_${token}`
       }];
     })
@@ -148,14 +188,15 @@ async function handleMyTokens(bot, msg) {
   if (prefs.tokens.length > 0) {
     const standardTokens = prefs.tokens.map(t => {
       const tokenInfo = TOKENS[t];
-      return `• ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol})`;
+      return `• ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol.toUpperCase()})`;
     }).join('\n');
     tokenList += `*Standard Tokens:*\n${standardTokens}`;
   }
   
   if (prefs.customTokens && prefs.customTokens.length > 0) {
     const customTokens = prefs.customTokens.map(ct => {
-      return `• $${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)`;
+      const symbolUpper = (ct.symbol || 'Unknown').toUpperCase();
+      return `• ${symbolUpper} ($${symbolUpper})`;
     }).join('\n');
     if (tokenList) tokenList += '\n\n';
     tokenList += `*Custom Solana Tokens:*\n${customTokens}`;
@@ -370,7 +411,7 @@ async function handleTokenAddress(bot, msg) {
     // Build confirmation message with full address (copyable)
     let confirmMessage = `✅ *Token Added Successfully!*\n\n` +
       `*Name:* ${tokenInfo.name}\n` +
-      `*Symbol:* $${tokenInfo.symbol}\n` +
+      `*Symbol:* $${(tokenInfo.symbol || '').toUpperCase()}\n` +
       `*Address:*\n\`${tokenAddress}\`\n\n`;
     
     if (tokenInfo.creator) {

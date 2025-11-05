@@ -16,7 +16,7 @@ function formatPriceMessage(token, priceData) {
   }).format(now);
   const utcTime = now.toUTCString().split(' ')[4]; // Extract time from UTC string
   
-  return `${directionEmoji} *$${tokenInfo.symbol} @ $${priceData.price}*
+  return `${directionEmoji} *$${(tokenInfo.symbol || '').toUpperCase()} @ $${priceData.price}*
 
 ${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%
 
@@ -40,11 +40,11 @@ function formatAlertMessage(token, priceData, dropPercentage, previousPrice) {
   }).format(now);
   const utcTime = now.toUTCString().split(' ')[4]; // Extract time from UTC string
   
-  return `🚨 *PRICE ALERT - $${tokenInfo.symbol}*
+  return `🚨 *PRICE ALERT - $${(tokenInfo.symbol || '').toUpperCase()}*
 
 ⚠️ *5%+ Drop Detected!*
 
-🔴 *$${tokenInfo.symbol} @ $${priceData.price}* (was $${previousPrice})
+🔴 *$${(tokenInfo.symbol || '').toUpperCase()} @ $${priceData.price}* (was $${previousPrice})
 📉 *Drop: -${dropPercentage.toFixed(2)}%*
 ${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%
 
