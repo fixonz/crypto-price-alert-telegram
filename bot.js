@@ -92,35 +92,68 @@ app.listen(PORT, () => {
 });
 
 // Keep-alive mechanism for free tier hosting (prevents spin-down)
-const KEEP_ALIVE_URL = process.env.KEEP_ALIVE_URL || `http://localhost:${PORT}/health`;
-const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000; // 10 minutes (free tier spins down after 15 min)
+// Note: Self-pinging doesn't prevent Render spin-down - use external service like UptimeRobot
+const KEEP_ALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes (more frequent than 10 min)
+
+// Determine the best URL to ping
+function getKeepAliveUrl() {
+  // Priority: 1) Custom URL, 2) Render external URL, 3) Localhost
+  if (process.env.KEEP_ALIVE_URL) {
+    return process.env.KEEP_ALIVE_URL;
+  }
+  if (process.env.RENDER_EXTERNAL_URL) {
+    return `${process.env.RENDER_EXTERNAL_URL}/health`;
+  }
+  return `http://localhost:${PORT}/health`;
+}
 
 // Self-ping function to keep service alive
 async function keepAlive() {
+  const url = getKeepAliveUrl();
+  const timestamp = new Date().toISOString();
+  
   try {
-    const response = await axios.get(KEEP_ALIVE_URL, { timeout: 5000 });
-    console.log(`Keep-alive ping successful: ${response.status}`);
+    const response = await axios.get(url, { 
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'CryptoPriceBot-KeepAlive/1.0'
+      }
+    });
+    console.log(`[${timestamp}] ✅ Keep-alive ping successful: ${url} (${response.status})`);
+    return true;
   } catch (error) {
-    // If localhost doesn't work (e.g., on Render), try the public URL
-    if (KEEP_ALIVE_URL.includes('localhost') && process.env.RENDER_EXTERNAL_URL) {
+    // If external URL fails, try localhost as fallback
+    if (!url.includes('localhost') && process.env.RENDER_EXTERNAL_URL) {
       try {
-        await axios.get(`${process.env.RENDER_EXTERNAL_URL}/health`, { timeout: 5000 });
-        console.log('Keep-alive ping successful (external URL)');
-      } catch (err) {
-        console.log('Keep-alive ping failed (will retry)');
+        const localUrl = `http://localhost:${PORT}/health`;
+        const response = await axios.get(localUrl, { timeout: 5000 });
+        console.log(`[${timestamp}] ✅ Keep-alive ping successful (localhost fallback): ${response.status}`);
+        return true;
+      } catch (localError) {
+        console.log(`[${timestamp}] ⚠️ Keep-alive ping failed: ${error.message || error}`);
       }
     } else {
-      console.log('Keep-alive ping failed (will retry)');
+      console.log(`[${timestamp}] ⚠️ Keep-alive ping failed: ${error.message || error}`);
     }
+    
+    // Log warning about external service
+    if (!process.env.RENDER_EXTERNAL_URL && !process.env.KEEP_ALIVE_URL) {
+      console.log(`[${timestamp}] 💡 Tip: Self-pinging may not prevent Render spin-down. Use external service like UptimeRobot to ping your /health endpoint every 5 minutes.`);
+    }
+    return false;
   }
 }
 
-// Start keep-alive ping every 10 minutes
+// Start keep-alive ping every 5 minutes
 if (process.env.ENABLE_KEEP_ALIVE !== 'false') {
   setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
   // Initial ping after 30 seconds (to let server start)
-  setTimeout(keepAlive, 30000);
-  console.log('Keep-alive mechanism enabled (pinging every 10 minutes)');
+  setTimeout(() => {
+    console.log(`🔔 Keep-alive mechanism enabled (pinging every ${KEEP_ALIVE_INTERVAL / 60000} minutes)`);
+    console.log(`📍 Keep-alive URL: ${getKeepAliveUrl()}`);
+    console.log(`💡 For best results on Render free tier, use external service like UptimeRobot to ping your /health endpoint`);
+    keepAlive();
+  }, 30000);
 }
 
 // Initialize price history for all tokens on startup
@@ -163,6 +196,18 @@ initializePriceHistory();
 process.on('SIGINT', () => {
   console.log('\nBot shutting down...');
   const scheduledJobs = getScheduledJobs();
-  Object.values(scheduledJobs).forEach(job => job.destroy());
+  Object.values(scheduledJobs).forEach(job => {
+    try {
+      if (typeof job.destroy === 'function') job.destroy();
+      else if (job.stop) job.stop();
+    } catch (e) {}
+  });
+  
+  // Close database connection
+  try {
+    const { closeDatabase } = require('./utils/database');
+    closeDatabase();
+  } catch (e) {}
+  
   process.exit(0);
 });

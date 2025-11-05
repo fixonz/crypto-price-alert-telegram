@@ -9,7 +9,16 @@ let scheduledJobs = {};
 function scheduleUserUpdates(bot, chatId, userPrefs) {
   // Cancel existing job if any
   if (scheduledJobs[chatId]) {
-    scheduledJobs[chatId].destroy();
+    try {
+      // Check if it's a valid cron job with destroy method
+      if (typeof scheduledJobs[chatId].destroy === 'function') {
+        scheduledJobs[chatId].destroy();
+      } else if (scheduledJobs[chatId].stop) {
+        scheduledJobs[chatId].stop();
+      }
+    } catch (error) {
+      console.warn(`Error destroying job for user ${chatId}:`, error.message);
+    }
     delete scheduledJobs[chatId];
   }
 

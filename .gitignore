@@ -5,6 +5,9 @@ node_modules/
 *.log
 users.json
 prices.json
+*.db
+*.db-shm
+*.db-wal
 
 # OS files
 .DS_Store

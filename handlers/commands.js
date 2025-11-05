@@ -4,7 +4,7 @@ const { getSolanaTokenInfo } = require('../utils/api');
 const { scheduleUserUpdates } = require('../services/scheduler');
 const { notifyAdminNewUser } = require('./admin');
 
-// Start command
+// Start command - Beautiful menu with status and buttons
 async function handleStart(bot, msg) {
   const chatId = msg.chat.id;
   const userInfo = await getUserPreferences(chatId);
@@ -26,20 +26,61 @@ async function handleStart(bot, msg) {
     );
   }
 
-  const welcomeMessage = `👋 *Welcome to Crypto Price Bot!*
+  // Build status message
+  let statusMessage = `👋 *Welcome to Crypto Price Bot!*\n\n`;
+  statusMessage += `📊 *Your Tracking Status*\n\n`;
 
-Select which cryptocurrencies you want to track:
-• /select - Choose tokens to monitor (BTC, ETH, BNB, SOL)
-• /addtoken - Add custom Solana token by address
-• /interval - Set update interval
-• /mytokens - View your current settings
-• /stop - Stop receiving updates
+  // Show tracked tokens
+  const standardTokens = prefs.tokens || [];
+  const customTokens = prefs.customTokens || [];
+  
+  if (standardTokens.length === 0 && customTokens.length === 0) {
+    statusMessage += `🔸 *No tokens tracked yet*\n`;
+  } else {
+    if (standardTokens.length > 0) {
+      statusMessage += `*Main Tokens:*\n`;
+      standardTokens.forEach(tokenKey => {
+        const tokenInfo = TOKENS[tokenKey];
+        if (tokenInfo) {
+          statusMessage += `  ${tokenInfo.emoji} ${tokenInfo.name} (${tokenInfo.symbol})\n`;
+        }
+      });
+    }
+    
+    if (customTokens.length > 0) {
+      if (standardTokens.length > 0) statusMessage += `\n`;
+      statusMessage += `*Solana Tokens:*\n`;
+      customTokens.forEach(ct => {
+        statusMessage += `  🪙 ${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)\n`;
+      });
+    }
+  }
 
-🚨 *Instant Alerts:* You'll automatically receive instant alerts when any selected token drops 5% or more, regardless of your update interval!
+  statusMessage += `\n⏰ *Update Interval:* ${prefs.interval || 1} minute${(prefs.interval || 1) > 1 ? 's' : ''}`;
+  statusMessage += `\n🔔 *Status:* ${prefs.subscribed ? '✅ Active' : '❌ Inactive'}`;
+  statusMessage += `\n\n🚨 *Instant Alerts:* Price drops of 20%+ (Solana) or 5%+ (main tokens) are sent immediately!`;
 
-_Use /select or /addtoken to get started!_`;
+  // Build beautiful keyboard menu
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: '➕ Add Main Token', callback_data: 'menu_add_main' },
+        { text: '➕ Add Solana Token', callback_data: 'menu_add_solana' }
+      ],
+      [
+        { text: '➖ Remove Tokens', callback_data: 'menu_remove' },
+        { text: '⏰ Change Interval', callback_data: 'menu_interval' }
+      ],
+      [
+        { text: prefs.subscribed ? '⏸️ Pause Updates' : '▶️ Resume Updates', callback_data: prefs.subscribed ? 'menu_pause' : 'menu_resume' }
+      ]
+    ]
+  };
 
-  await bot.sendMessage(chatId, welcomeMessage, { parse_mode: 'Markdown' });
+  await bot.sendMessage(chatId, statusMessage, { 
+    parse_mode: 'Markdown',
+    reply_markup: keyboard
+  });
 }
 
 // Select tokens command
@@ -309,14 +350,14 @@ async function handleTokenAddress(bot, msg) {
     delete users[chatId].waitingForTokenAddress;
     await saveUsers(users);
     
-    // Schedule updates for this user
-    scheduleUserUpdates(bot, chatId, userPrefs);
+    // Don't schedule yet - wait for user to choose interval
+    // scheduleUserUpdates will be called after interval selection
     
-    // Build confirmation message
+    // Build confirmation message with full address (copyable)
     let confirmMessage = `✅ *Token Added Successfully!*\n\n` +
       `*Name:* ${tokenInfo.name}\n` +
       `*Symbol:* ${tokenInfo.symbol}\n` +
-      `*Address:* \`${tokenAddress.substring(0, 8)}...${tokenAddress.substring(tokenAddress.length - 8)}\`\n\n`;
+      `*Address:*\n\`${tokenAddress}\`\n\n`;
     
     if (tokenInfo.creator) {
       confirmMessage += `👤 *Creator:* [${tokenInfo.creator.substring(0, 4)}...${tokenInfo.creator.substring(tokenInfo.creator.length - 4)}](https://solscan.io/account/${tokenInfo.creator})\n\n`;
@@ -330,10 +371,39 @@ async function handleTokenAddress(bot, msg) {
       confirmMessage += `💰 *Market Cap:* $${tokenInfo.marketCap.toLocaleString(undefined, { maximumFractionDigits: 2 })}\n\n`;
     }
     
-    confirmMessage += `You'll receive price updates for this token at your selected interval.\n\n` +
-      `Use /mytokens to view all your tokens.`;
+    confirmMessage += `Now choose your update interval:`;
     
-    await bot.sendMessage(chatId, confirmMessage, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    // Send image if available, otherwise just text
+    if (tokenInfo.imageUrl) {
+      try {
+        await bot.sendPhoto(chatId, tokenInfo.imageUrl, {
+          caption: confirmMessage,
+          parse_mode: 'Markdown'
+        });
+      } catch (error) {
+        // If image fails, send text message instead
+        console.warn('Failed to send token image:', error.message);
+        await bot.sendMessage(chatId, confirmMessage, { parse_mode: 'Markdown', disable_web_page_preview: true });
+      }
+    } else {
+      await bot.sendMessage(chatId, confirmMessage, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    }
+    
+    // Prompt for interval selection
+    const keyboard = {
+      inline_keyboard: [
+        ...VALID_INTERVALS.map(interval => [{
+          text: `⏰ ${interval} minute${interval > 1 ? 's' : ''}`,
+          callback_data: `set_interval_after_token_${interval}`
+        }]),
+        [{ text: '🔙 Back to Menu', callback_data: 'menu_back' }]
+      ]
+    };
+    
+    await bot.sendMessage(chatId, '⏰ *Choose Update Interval*\n\nHow often do you want to receive price updates for this token?', {
+      reply_markup: keyboard,
+      parse_mode: 'Markdown'
+    });
   }
 }
 

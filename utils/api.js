@@ -1,9 +1,11 @@
 const axios = require('axios');
 const { TOKENS } = require('../config/tokens');
 
-// Price cache to reduce API calls
+// Price cache - query once per minute, cache for 1 minute
 const priceCache = {};
-const CACHE_TTL = 30 * 1000; // 30 seconds cache for standard tokens
+const CACHE_TTL = 60 * 1000; // 1 minute cache (exactly as requested)
+let isFetching = false; // Lock to prevent multiple simultaneous API calls
+let fetchPromise = null; // Store the ongoing fetch promise
 
 // Solana token cache (1-5 minutes)
 const solanaPriceCache = {};
@@ -262,113 +264,135 @@ async function getSolanaTokenInfo(tokenAddress) {
   }
 }
 
-// Fetch prices from CoinCap (fallback API)
-async function fetchFromCoinCap() {
+// Fetch prices from FreeCryptoAPI (once per minute)
+async function fetchFromFreeCryptoAPI() {
+  const apiKey = process.env.FREECRYPTOAPI_KEY;
+  if (!apiKey) {
+    console.error('❌ FREECRYPTOAPI_KEY not set in environment variables');
+    return null;
+  }
+
   try {
+    // Map our token IDs to FreeCryptoAPI symbols
+    const tokenSymbols = {
+      'bitcoin': 'BTC',
+      'ethereum': 'ETH',
+      'binancecoin': 'BNB',
+      'solana': 'SOL'
+    };
+
     const result = {};
     
-    // CoinCap doesn't support batch requests, so fetch individually
-    // But we'll use their rates endpoint which is more efficient
-    const coinCapIds = ['bitcoin', 'ethereum', 'binancecoin', 'solana'];
+    // Fetch all tokens in parallel (or sequentially if API requires it)
+    const symbols = Object.values(TOKENS).map(t => tokenSymbols[t.id]).filter(Boolean);
     
-    for (const coinCapId of coinCapIds) {
+    for (const symbol of symbols) {
       try {
-        const response = await axios.get(`https://api.coincap.io/v2/assets/${coinCapId}`, {
-          timeout: 5000
+        const response = await axios.get(`https://api.freecryptoapi.com/v1/getData`, {
+          params: {
+            symbol: symbol
+          },
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Accept': 'application/json'
+          },
+          timeout: 10000
         });
-        
-        const coin = response.data.data;
-        
-        // Map CoinCap ID to our token ID
-        let tokenKey = null;
-        if (coinCapId === 'bitcoin') tokenKey = 'bitcoin';
-        else if (coinCapId === 'ethereum') tokenKey = 'ethereum';
-        else if (coinCapId === 'binancecoin') tokenKey = 'binancecoin';
-        else if (coinCapId === 'solana') tokenKey = 'solana';
-        
-        if (tokenKey && TOKENS[tokenKey]) {
-          result[TOKENS[tokenKey].id] = {
-            usd: parseFloat(coin.priceUsd),
-            usd_24h_change: parseFloat(coin.changePercent24Hr) || 0
-          };
+
+        if (response.data && response.data.price !== undefined) {
+          // Find the token ID for this symbol
+          const tokenId = Object.keys(tokenSymbols).find(id => tokenSymbols[id] === symbol);
+          if (tokenId && TOKENS[tokenId]) {
+            result[tokenId] = {
+              usd: parseFloat(response.data.price),
+              usd_24h_change: parseFloat(response.data.change24h || response.data.change_24h || 0)
+            };
+          }
         }
         
-        // Small delay between requests to avoid rate limiting
+        // Small delay between requests
         await new Promise(resolve => setTimeout(resolve, 200));
       } catch (error) {
-        console.warn(`Failed to fetch ${coinCapId} from CoinCap:`, error.message);
+        console.warn(`FreeCryptoAPI: Failed to fetch ${symbol}:`, error.message);
       }
     }
     
     // Return result only if we got at least one price
     return Object.keys(result).length > 0 ? result : null;
   } catch (error) {
-    console.error('CoinCap fallback error:', error.message);
+    console.error('FreeCryptoAPI error:', error.message);
     return null;
   }
 }
 
-// Fetch prices for all tokens at once (more efficient)
+// Fetch prices for all tokens - queries once per minute, uses cache for all requests
 async function getAllTokenPrices() {
   const cacheKey = 'all_prices';
   const cached = priceCache[cacheKey];
+  const now = Date.now();
   
-  // Return cached data if still valid
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+  // Return cached data if still valid (within 1 minute)
+  if (cached && (now - cached.timestamp) < CACHE_TTL) {
     return cached.data;
   }
   
-  // Try CoinGecko first (primary API)
-  try {
-    // Fetch all tokens in one API call
-    const tokenIds = Object.values(TOKENS).map(t => t.id).join(',');
-    const response = await axios.get(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${tokenIds}&vs_currencies=usd&include_24hr_change=true`,
-      {
-        timeout: 10000,
-        headers: {
-          'Accept': 'application/json'
-        }
+  // If already fetching, wait for that promise instead of starting a new request
+  if (isFetching && fetchPromise) {
+    try {
+      const result = await fetchPromise;
+      return result;
+    } catch (error) {
+      // If fetch failed, try to use cached data
+      if (cached) {
+        console.warn('⚠️ API fetch failed, using cached data');
+        return cached.data;
       }
-    );
-    
-    // Cache the results
-    priceCache[cacheKey] = {
-      data: response.data,
-      timestamp: Date.now(),
-      source: 'coingecko'
-    };
-    
-    return response.data;
-  } catch (error) {
-    if (error.response?.status === 429) {
-      console.warn('⚠️ CoinGecko rate limit hit. Trying fallback API...');
-    } else {
-      console.warn(`⚠️ CoinGecko error: ${error.message}. Trying fallback API...`);
+      return null;
     }
-    
-    // Try fallback API (CoinCap)
-    const fallbackData = await fetchFromCoinCap();
-    if (fallbackData) {
-      console.log('✅ Using CoinCap as fallback');
-      // Cache the fallback results
-      priceCache[cacheKey] = {
-        data: fallbackData,
-        timestamp: Date.now(),
-        source: 'coincap'
-      };
-      return fallbackData;
-    }
-    
-    // If both fail, use cached data if available
-    if (cached) {
-      console.warn('⚠️ Both APIs failed. Using cached data.');
-      return cached.data;
-    }
-    
-    console.error('❌ All price APIs failed and no cache available');
-    return null;
   }
+  
+  // Start fetching (lock to prevent multiple simultaneous calls)
+  isFetching = true;
+  fetchPromise = (async () => {
+    try {
+      console.log('📡 Fetching prices from FreeCryptoAPI (once per minute)...');
+      const data = await fetchFromFreeCryptoAPI();
+      
+      if (data) {
+        // Cache the results
+        priceCache[cacheKey] = {
+          data: data,
+          timestamp: Date.now(),
+          source: 'freecryptoapi'
+        };
+        console.log('✅ Prices fetched and cached');
+        return data;
+      } else {
+        // If API failed, use cached data if available
+        if (cached) {
+          console.warn('⚠️ API fetch returned no data, using cached data');
+          return cached.data;
+        }
+        return null;
+      }
+    } catch (error) {
+      console.error('❌ Error fetching prices:', error.message);
+      // Use cached data if available
+      if (cached) {
+        console.warn('⚠️ Using cached data due to error');
+        return cached.data;
+      }
+      return null;
+    } finally {
+      // Release lock after a short delay to ensure cache is fresh
+      setTimeout(() => {
+        isFetching = false;
+        fetchPromise = null;
+      }, 1000);
+    }
+  })();
+  
+  return await fetchPromise;
 }
 
 // Fetch price for a specific token
