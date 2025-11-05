@@ -162,31 +162,29 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
   }
   
   // Add transaction data if available (from pump.fun market activity)
+  // Format as code block for better visibility (only 5m and 6h)
   if (currentTokenInfo.transactions) {
     const tx = currentTokenInfo.transactions;
+    
+    // Build formatted market activity data
+    let activityLines = [];
+    
+    // 5m data
     if (tx.m5) {
-      const m5Data = tx.m5;
-      const m5Change = typeof m5Data.priceChangePercent === 'number' ? m5Data.priceChangePercent.toFixed(2) : null;
-      message += `\n📊 *5m:* ${m5Data.buys || 0} buys / ${m5Data.sells || 0} sells`;
-      if (m5Change !== null) {
-        message += ` (${m5Change >= 0 ? '+' : ''}${m5Change}%)`;
-      }
+      const m5 = tx.m5;
+      const m5Change = typeof m5.priceChangePercent === 'number' ? m5.priceChangePercent.toFixed(2) : '0.00';
+      activityLines.push(`5m:  ${m5.buys || 0}↑ / ${m5.sells || 0}↓ | $${(m5.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${m5Change >= 0 ? '+' : ''}${m5Change}%`);
     }
-    if (tx.h1) {
-      const h1Data = tx.h1;
-      const h1Change = typeof h1Data.priceChangePercent === 'number' ? h1Data.priceChangePercent.toFixed(2) : null;
-      message += `\n📊 *1h:* ${h1Data.buys || 0} buys / ${h1Data.sells || 0} sells`;
-      if (h1Change !== null) {
-        message += ` (${h1Change >= 0 ? '+' : ''}${h1Change}%)`;
-      }
-    }
+    
+    // 6h data
     if (tx.h6) {
-      const h6Data = tx.h6;
-      const h6Change = typeof h6Data.priceChangePercent === 'number' ? h6Data.priceChangePercent.toFixed(2) : null;
-      message += `\n📊 *6h:* ${h6Data.buys || 0} buys / ${h6Data.sells || 0} sells`;
-      if (h6Change !== null) {
-        message += ` (${h6Change >= 0 ? '+' : ''}${h6Change}%)`;
-      }
+      const h6 = tx.h6;
+      const h6Change = typeof h6.priceChangePercent === 'number' ? h6.priceChangePercent.toFixed(2) : '0.00';
+      activityLines.push(`6h:  ${h6.buys || 0}↑ / ${h6.sells || 0}↓ | $${(h6.volumeUSD || 0).toLocaleString(undefined, {maximumFractionDigits: 0})} vol | ${h6Change >= 0 ? '+' : ''}${h6Change}%`);
+    }
+    
+    if (activityLines.length > 0) {
+      message += `\n\n📊 *Market Activity:*\n\`\`\`\n${activityLines.join('\n')}\n\`\`\``;
     }
   }
   

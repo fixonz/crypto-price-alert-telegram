@@ -16,6 +16,7 @@ const solanaMetadataCache = {};
 const METADATA_CACHE_TTL = 5 * 60 * 1000; // 5 minutes for metadata
 
 // Fetch Solana token price from GeckoTerminal (with caching)
+// For pump.fun tokens, also fetches market activity to get accurate 24h change
 async function getSolanaTokenPrice(tokenAddress) {
   // Check cache first
   const cached = solanaPriceCache[tokenAddress];
@@ -40,7 +41,24 @@ async function getSolanaTokenPrice(tokenAddress) {
     }
     
     const price = parseFloat(data.token_prices[tokenAddress]);
-    const change24h = data.h24_price_change_percentage?.[tokenAddress] || 0;
+    let change24h = data.h24_price_change_percentage?.[tokenAddress] || 0;
+    
+    // Try to get more accurate 24h change from pump.fun market activity
+    // First check if it's a pump.fun token by trying to get token info
+    try {
+      const tokenInfo = await getSolanaTokenInfo(tokenAddress);
+      if (tokenInfo && tokenInfo.pumpSwapPool && tokenInfo.transactions && tokenInfo.transactions.h24) {
+        // Use 24h priceChangePercent from pump.fun market activity (more accurate)
+        const pump24hChange = tokenInfo.transactions.h24.priceChangePercent;
+        if (typeof pump24hChange === 'number' && !isNaN(pump24hChange)) {
+          change24h = pump24hChange;
+          console.log(`Using pump.fun 24h change for ${tokenAddress}: ${change24h.toFixed(2)}%`);
+        }
+      }
+    } catch (pumpError) {
+      // If pump.fun fetch fails, continue with GeckoTerminal data
+      console.log(`Could not fetch pump.fun data for ${tokenAddress}, using GeckoTerminal 24h change`);
+    }
     
     const result = {
       price: price.toFixed(price < 0.01 ? 8 : price < 1 ? 6 : 2),
@@ -117,30 +135,50 @@ async function getSolanaTokenInfo(tokenAddress) {
             if (activity) {
               result.transactions = {
                 m5: activity['5m'] ? {
+                  numTxs: activity['5m'].numTxs || 0,
+                  volumeUSD: activity['5m'].volumeUSD || 0,
+                  numUsers: activity['5m'].numUsers || 0,
                   buys: activity['5m'].numBuys || 0,
                   sells: activity['5m'].numSells || 0,
+                  numBuyers: activity['5m'].numBuyers || 0,
+                  numSellers: activity['5m'].numSellers || 0,
                   buyVolumeUSD: activity['5m'].buyVolumeUSD || 0,
                   sellVolumeUSD: activity['5m'].sellVolumeUSD || 0,
                   priceChangePercent: activity['5m'].priceChangePercent || 0
                 } : null,
                 m15: null, // pump.fun doesn't provide 15m
                 h1: activity['1h'] ? {
+                  numTxs: activity['1h'].numTxs || 0,
+                  volumeUSD: activity['1h'].volumeUSD || 0,
+                  numUsers: activity['1h'].numUsers || 0,
                   buys: activity['1h'].numBuys || 0,
                   sells: activity['1h'].numSells || 0,
+                  numBuyers: activity['1h'].numBuyers || 0,
+                  numSellers: activity['1h'].numSellers || 0,
                   buyVolumeUSD: activity['1h'].buyVolumeUSD || 0,
                   sellVolumeUSD: activity['1h'].sellVolumeUSD || 0,
                   priceChangePercent: activity['1h'].priceChangePercent || 0
                 } : null,
                 h6: activity['6h'] ? {
+                  numTxs: activity['6h'].numTxs || 0,
+                  volumeUSD: activity['6h'].volumeUSD || 0,
+                  numUsers: activity['6h'].numUsers || 0,
                   buys: activity['6h'].numBuys || 0,
                   sells: activity['6h'].numSells || 0,
+                  numBuyers: activity['6h'].numBuyers || 0,
+                  numSellers: activity['6h'].numSellers || 0,
                   buyVolumeUSD: activity['6h'].buyVolumeUSD || 0,
                   sellVolumeUSD: activity['6h'].sellVolumeUSD || 0,
                   priceChangePercent: activity['6h'].priceChangePercent || 0
                 } : null,
                 h24: activity['24h'] ? {
+                  numTxs: activity['24h'].numTxs || 0,
+                  volumeUSD: activity['24h'].volumeUSD || 0,
+                  numUsers: activity['24h'].numUsers || 0,
                   buys: activity['24h'].numBuys || 0,
                   sells: activity['24h'].numSells || 0,
+                  numBuyers: activity['24h'].numBuyers || 0,
+                  numSellers: activity['24h'].numSellers || 0,
                   buyVolumeUSD: activity['24h'].buyVolumeUSD || 0,
                   sellVolumeUSD: activity['24h'].sellVolumeUSD || 0,
                   priceChangePercent: activity['24h'].priceChangePercent || 0
