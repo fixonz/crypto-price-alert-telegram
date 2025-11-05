@@ -122,7 +122,7 @@ async function handleCallbackQuery(bot, query) {
             const selected = prefs.tokens.includes(t);
             const isDisabled = !selected && hasMainTokenNow;
             return [{
-              text: `${selected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tInfo.emoji} ${tInfo.name} (${tInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
+              text: `${selected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tInfo.emoji} ${tInfo.name} ($${tInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
               callback_data: isDisabled ? 'disabled' : `toggle_${t}`
             }];
           }),
@@ -143,7 +143,7 @@ async function handleCallbackQuery(bot, query) {
           const selected = prefs.tokens.includes(t);
           const isDisabled = !selected && hasMainTokenNow;
           return [{
-            text: `${selected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tInfo.name} (${tInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
+            text: `${selected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tInfo.name} ($${tInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
             callback_data: isDisabled ? 'disabled' : `toggle_${t}`
           }];
         })
@@ -239,7 +239,7 @@ async function handleSelectFromMenu(bot, query) {
         const isSelected = prefs.tokens.includes(token);
         const isDisabled = !isSelected && hasMainToken;
         return [{
-          text: `${isSelected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tokenInfo.emoji} ${tokenInfo.name} (${tokenInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
+          text: `${isSelected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
           callback_data: isDisabled ? 'disabled' : `toggle_${token}`
         }];
       }),
@@ -311,7 +311,7 @@ async function handleRemoveTokensFromMenu(bot, query) {
       const tokenInfo = TOKENS[tokenKey];
       if (tokenInfo) {
         buttons.push([{
-          text: `➖ Remove ${tokenInfo.emoji} ${tokenInfo.name} (${tokenInfo.symbol})`,
+          text: `➖ Remove ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol})`,
           callback_data: `remove_main_${tokenKey}`
         }]);
       }
@@ -322,7 +322,7 @@ async function handleRemoveTokensFromMenu(bot, query) {
   if (prefs.customTokens && prefs.customTokens.length > 0) {
     prefs.customTokens.forEach(ct => {
       buttons.push([{
-        text: `➖ Remove 🪙 ${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)`,
+        text: `➖ Remove $${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)`,
         callback_data: `remove_solana_${ct.address}`
       }]);
     });

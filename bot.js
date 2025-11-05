@@ -206,6 +206,12 @@ cron.schedule('*/2 * * * *', async () => {
   await checkPriceDrops(bot);
 });
 
+// Schedule DexScreener boost checking (runs every 30 minutes)
+const { checkBoostsForAllTokens } = require('./services/boostChecker');
+cron.schedule('*/30 * * * *', async () => {
+  await checkBoostsForAllTokens(bot);
+});
+
 // Initialize price history on startup
 initializePriceHistory();
 

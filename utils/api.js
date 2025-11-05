@@ -464,10 +464,49 @@ async function getTokenPrice(tokenId) {
   };
 }
 
+// Check DexScreener orders/boosts for a Solana token
+async function checkDexScreenerBoosts(tokenAddress) {
+  try {
+    const response = await axios.get(
+      `https://api.dexscreener.com/orders/v1/solana/${tokenAddress}`,
+      {
+        timeout: 10000,
+        headers: {
+          'Accept': 'application/json'
+        }
+      }
+    );
+    
+    if (response.data && Array.isArray(response.data)) {
+      // Check if there are any active boosts/ads
+      const boosts = response.data.filter(item => 
+        item.type === 'tokenProfile' && 
+        (item.status === 'processing' || item.status === 'active')
+      );
+      
+      return {
+        hasBoosts: boosts.length > 0,
+        boosts: boosts,
+        rawData: response.data
+      };
+    }
+    
+    return {
+      hasBoosts: false,
+      boosts: [],
+      rawData: response.data || []
+    };
+  } catch (error) {
+    console.error(`Error checking DexScreener boosts for ${tokenAddress}:`, error.message);
+    return null;
+  }
+}
+
 module.exports = {
   getSolanaTokenPrice,
   getSolanaTokenInfo,
   getAllTokenPrices,
-  getTokenPrice
+  getTokenPrice,
+  checkDexScreenerBoosts
 };
 

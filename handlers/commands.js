@@ -27,38 +27,43 @@ async function handleStart(bot, msg) {
   }
 
   // Build status message
-  let statusMessage = `👋 *Welcome to Crypto Price Bot!*\n\n`;
-  statusMessage += `📊 *Your Tracking Status*\n\n`;
-
-  // Show tracked tokens
+  let statusMessage = `👋 <b>Welcome to Crypto Price Bot!</b>\n\n`;
+  
+  // Show tracked tokens with custom LIVE emojis
   const standardTokens = prefs.tokens || [];
   const customTokens = prefs.customTokens || [];
   
   if (standardTokens.length === 0 && customTokens.length === 0) {
-    statusMessage += `🔸 *No tokens tracked yet*\n`;
+    statusMessage += `📊 <b>Your Tracking Status</b>\n\n`;
+    statusMessage += `🔸 <b>No tokens tracked yet</b>\n`;
   } else {
+    // Custom emojis for "LIVE" (no spaces between them)
+    const liveEmojis = `<tg-emoji emoji-id="5895702350248547531">L</tg-emoji><tg-emoji emoji-id="5895657545149715556">I</tg-emoji><tg-emoji emoji-id="5895565508295529026">V</tg-emoji>`;
+    
+    statusMessage += `Tracking ${liveEmojis}:\n\n`;
+    
     if (standardTokens.length > 0) {
-      statusMessage += `*Main Tokens:*\n`;
+      statusMessage += `<b>Main Tokens:</b>\n`;
       standardTokens.forEach(tokenKey => {
         const tokenInfo = TOKENS[tokenKey];
         if (tokenInfo) {
-          statusMessage += `  ${tokenInfo.emoji} ${tokenInfo.name} (${tokenInfo.symbol})\n`;
+          statusMessage += `  ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol})\n`;
         }
       });
     }
     
     if (customTokens.length > 0) {
       if (standardTokens.length > 0) statusMessage += `\n`;
-      statusMessage += `*Solana Tokens:*\n`;
+      statusMessage += `<b>Solana Tokens:</b>\n`;
       customTokens.forEach(ct => {
-        statusMessage += `  🪙 ${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)\n`;
+        statusMessage += `  $${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)\n`;
       });
     }
   }
 
-  statusMessage += `\n⏰ *Update Interval:* ${prefs.interval || 1} minute${(prefs.interval || 1) > 1 ? 's' : ''}`;
-  statusMessage += `\n🔔 *Status:* ${prefs.subscribed ? '✅ Active' : '❌ Inactive'}`;
-  statusMessage += `\n\n🚨 *Instant Alerts:* Price drops of 20%+ (Solana) or 5%+ (main tokens) are sent immediately!`;
+  statusMessage += `\n⏰ <b>Update Interval:</b> ${prefs.interval || 1} minute${(prefs.interval || 1) > 1 ? 's' : ''}`;
+  statusMessage += `\n🔔 <b>Status:</b> ${prefs.subscribed ? '✅ Active' : '❌ Inactive'}`;
+  statusMessage += `\n\n🚨 <b>Instant Alerts:</b> Price drops of 20%+ (Solana) or 5%+ (main tokens) are sent immediately!`;
 
   // Build beautiful keyboard menu
   const keyboard = {
@@ -78,7 +83,7 @@ async function handleStart(bot, msg) {
   };
 
   await bot.sendMessage(chatId, statusMessage, { 
-    parse_mode: 'Markdown',
+    parse_mode: 'HTML', // Use HTML for custom emojis
     reply_markup: keyboard
   });
 }
@@ -99,7 +104,7 @@ async function handleSelect(bot, msg) {
       const isSelected = prefs.tokens.includes(token);
       const isDisabled = !isSelected && hasMainToken;
       return [{
-        text: `${isSelected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tokenInfo.name} (${tokenInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
+        text: `${isSelected ? '✅' : isDisabled ? '🚫' : '⬜'} ${tokenInfo.name} ($${tokenInfo.symbol})${isDisabled ? ' (Limit: 1)' : ''}`,
         callback_data: isDisabled ? 'disabled' : `toggle_${token}`
       }];
     })
@@ -143,14 +148,14 @@ async function handleMyTokens(bot, msg) {
   if (prefs.tokens.length > 0) {
     const standardTokens = prefs.tokens.map(t => {
       const tokenInfo = TOKENS[t];
-      return `• ${tokenInfo.emoji} ${tokenInfo.name} (${tokenInfo.symbol})`;
+      return `• ${tokenInfo.emoji} ${tokenInfo.name} ($${tokenInfo.symbol})`;
     }).join('\n');
     tokenList += `*Standard Tokens:*\n${standardTokens}`;
   }
   
   if (prefs.customTokens && prefs.customTokens.length > 0) {
     const customTokens = prefs.customTokens.map(ct => {
-      return `• 🪙 ${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)`;
+      return `• $${ct.symbol || 'Unknown'} (${ct.address.substring(0, 8)}...)`;
     }).join('\n');
     if (tokenList) tokenList += '\n\n';
     tokenList += `*Custom Solana Tokens:*\n${customTokens}`;
@@ -265,7 +270,7 @@ async function handleAdmin(bot, msg) {
 • Active Users: *${activeUsers}*
 • Inactive Users: *${totalUsers - activeUsers}*
 
-🪙 *Token Distribution:*
+*Token Distribution:*
 ${tokenList}
 
 _Updated: ${new Date().toLocaleString()}_`;
@@ -365,7 +370,7 @@ async function handleTokenAddress(bot, msg) {
     // Build confirmation message with full address (copyable)
     let confirmMessage = `✅ *Token Added Successfully!*\n\n` +
       `*Name:* ${tokenInfo.name}\n` +
-      `*Symbol:* ${tokenInfo.symbol}\n` +
+      `*Symbol:* $${tokenInfo.symbol}\n` +
       `*Address:*\n\`${tokenAddress}\`\n\n`;
     
     if (tokenInfo.creator) {

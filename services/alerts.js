@@ -92,10 +92,10 @@ async function checkPriceDrops(bot) {
           const now = new Date();
           const athensTime = new Intl.DateTimeFormat('en-US', {
             timeZone: 'Europe/Athens',
-            hour: 'numeric',
+            hour: '2-digit',
             minute: '2-digit',
             second: '2-digit',
-            hour12: true
+            hour12: false
           }).format(now);
           const utcTime = now.toUTCString().split(' ')[4];
           const arrowEmoji = change24h >= 0 ? '📈' : '📉';
@@ -106,9 +106,9 @@ async function checkPriceDrops(bot) {
             : 'N/A';
           
           // Build alert message - start with format visible in message list
-          let alertMessage = `🚨 *ALERT - ${alertTokenInfo.symbol} @ ${mcapText}*\n\n` +
+          let alertMessage = `🚨 *ALERT - $${alertTokenInfo.symbol} @ ${mcapText}*\n\n` +
             `⚠️ *20%+ Drop Detected!*\n\n` +
-            `🔴 *${alertTokenInfo.symbol} @ $${priceData.price}* (was $${lastPrice.toFixed(priceData.price.includes('.') ? priceData.price.split('.')[1].length : 2)})\n` +
+            `🔴 *$${alertTokenInfo.symbol} @ $${priceData.price}* (was $${lastPrice.toFixed(priceData.price.includes('.') ? priceData.price.split('.')[1].length : 2)})\n` +
             `📉 *Drop: -${dropPercentage.toFixed(2)}%*\n` +
             `${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%\n\n`;
           
@@ -162,7 +162,7 @@ async function checkPriceDrops(bot) {
             `[DexScreener](https://dexscreener.com/solana/${customToken.address})`;
           
           alertMessage += linksSection;
-          alertMessage += `\n\n_Alert: ${athensTime} (UTC: ${utcTime})_`;
+          alertMessage += `\n\n_Alert at: Local ${athensTime} (UTC: ${utcTime})_`;
           
           try {
             await bot.sendMessage(chatId, alertMessage, { parse_mode: 'Markdown', disable_web_page_preview: true });
