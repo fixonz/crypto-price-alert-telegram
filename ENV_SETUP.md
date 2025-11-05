@@ -7,12 +7,36 @@ Create a `.env` file in the root directory with the following variables:
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 ADMIN_CHAT_ID=your_chat_id_here
+DATABASE_URL=your_neon_database_url_here
 ```
 
 ## Explanation
 
 - **TELEGRAM_BOT_TOKEN**: Your Telegram bot token from BotFather
 - **ADMIN_CHAT_ID**: Your Telegram chat ID to receive admin notifications
+- **DATABASE_URL**: Your Neon serverless Postgres connection string (required for alerts)
+
+## Database Setup (Neon)
+
+This bot uses **Neon** (serverless Postgres) for persistent storage. Without a database, alerts will not work.
+
+### Quick Setup:
+
+1. **Create a Neon account**: Visit [neon.tech](https://neon.tech) and sign up (free tier available)
+2. **Create a new project**: Click "New Project" in your dashboard
+3. **Copy connection string**: After creating the project, copy the connection string (it looks like: `postgresql://user:password@host/dbname`)
+4. **Add to environment**: Set `DATABASE_URL` in your `.env` file or Render environment variables
+
+The database tables (`users` and `price_history`) will be created automatically on first run.
+
+### Fallback to JSON Storage
+
+If you want to use JSON file storage instead (not recommended for production), set:
+```env
+USE_JSON_STORAGE=true
+```
+
+**Note**: JSON storage does not persist on serverless platforms like Render, so alerts may not work properly.
 
 ## Admin Features
 
@@ -35,4 +59,7 @@ When deploying to Render, add these environment variables in the Render dashboar
 - Go to your service → Environment tab
 - Add `TELEGRAM_BOT_TOKEN`
 - Add `ADMIN_CHAT_ID`
+- Add `DATABASE_URL` (your Neon connection string)
+
+**Important**: The `DATABASE_URL` is required for alerts to work. Without it, price drop alerts will not function.
 

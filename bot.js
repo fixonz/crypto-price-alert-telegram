@@ -188,6 +188,17 @@ async function initializePriceHistory() {
 
 // Start bot
 console.log('Bot started! Waiting for commands...');
+
+// Initialize database on startup
+(async () => {
+  try {
+    const { initDatabase } = require('./utils/database');
+    await initDatabase();
+  } catch (error) {
+    console.warn('Database initialization warning:', error.message);
+  }
+})();
+
 initializeSchedules(bot);
 
 // Schedule price drop monitoring (runs every 2 minutes to reduce API calls)
@@ -199,7 +210,7 @@ cron.schedule('*/2 * * * *', async () => {
 initializePriceHistory();
 
 // Handle graceful shutdown
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('\nBot shutting down...');
   const scheduledJobs = getScheduledJobs();
   Object.values(scheduledJobs).forEach(job => {
@@ -212,7 +223,7 @@ process.on('SIGINT', () => {
   // Close database connection
   try {
     const { closeDatabase } = require('./utils/database');
-    closeDatabase();
+    await closeDatabase();
   } catch (e) {}
   
   process.exit(0);

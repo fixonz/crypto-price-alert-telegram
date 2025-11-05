@@ -194,9 +194,27 @@ async function handleCallbackQuery(bot, query) {
     
     await bot.sendMessage(chatId, `✅ Update interval set to ${interval} minute${interval > 1 ? 's' : ''}.\n\n📊 Sending current prices for your tracked tokens...`);
     
+    // Reload user preferences to ensure we have the latest data (including newly added tokens)
+    const freshUserInfo = await getUserPreferences(chatId);
+    const freshPrefs = { ...freshUserInfo };
+    delete freshPrefs.isNew;
+    
+    // Log what we're about to send
+    console.log(`About to send updates for user ${chatId}:`, {
+      subscribed: freshPrefs.subscribed,
+      tokens: freshPrefs.tokens || [],
+      customTokensCount: (freshPrefs.customTokens || []).length,
+      customTokens: (freshPrefs.customTokens || []).map(ct => ({ symbol: ct.symbol, address: ct.address?.substring(0, 8) + '...' }))
+    });
+    
     // Send immediate price updates for all tracked tokens
     const { sendUserUpdates } = require('../services/priceUpdates');
-    await sendUserUpdates(bot, chatId, prefs);
+    try {
+      await sendUserUpdates(bot, chatId, freshPrefs);
+      console.log(`✅ Successfully sent updates for user ${chatId}`);
+    } catch (error) {
+      console.error(`❌ Error sending updates for user ${chatId}:`, error.message, error.stack);
+    }
     
     // Refresh main menu after a short delay
     setTimeout(async () => {

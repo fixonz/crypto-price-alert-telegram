@@ -29,16 +29,30 @@ async function sendPriceUpdate(bot, chatId, token) {
 async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
   const { getSolanaTokenPrice } = require('../utils/api');
   
+  console.log(`Fetching price for ${tokenInfo.symbol || tokenAddress} (${tokenAddress.substring(0, 8)}...)`);
+  
   // Fetch fresh price data
   const priceData = await getSolanaTokenPrice(tokenAddress);
   
   if (!priceData) {
+    console.error(`Failed to fetch price for ${tokenInfo.symbol || tokenAddress}`);
     await bot.sendMessage(chatId, `❌ Could not fetch price for ${tokenInfo.symbol || tokenAddress}. Token may not exist or API is unavailable.`);
     return;
   }
   
+  console.log(`Price fetched for ${tokenInfo.symbol}: $${priceData.price}`);
+  
   // Use stored token info (metadata fetched once when token was added)
   const currentTokenInfo = tokenInfo;
+  
+  // Debug: log if market cap is missing
+  if (!currentTokenInfo.marketCap) {
+    console.log(`⚠️ No market cap for ${currentTokenInfo.symbol} (${tokenAddress}) - stored metadata:`, {
+      hasMarketCap: !!currentTokenInfo.marketCap,
+      hasCreator: !!currentTokenInfo.creator,
+      hasPumpSwapPool: !!currentTokenInfo.pumpSwapPool
+    });
+  }
 
   // Calculate 5-minute price change for direction emoji
   const priceHistory = await loadPriceHistory();
@@ -122,8 +136,14 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
   }).format(new Date());
   const utcTime = new Date().toUTCString().split(' ')[4];
   
-  // Build message with all available data
-  let message = `${directionEmoji} *${currentTokenInfo.symbol} @ $${priceData.price}*\n\n` +
+  // Format market cap for message header (visible in chat list)
+  const mcapText = currentTokenInfo.marketCap 
+    ? `$${currentTokenInfo.marketCap.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+    : 'N/A';
+  
+  // Build message with market cap in header (visible in chat list) - no price, just mcap
+  let message = `${directionEmoji} *${currentTokenInfo.symbol} @ ${mcapText}*\n\n` +
+    `💰 *Price:* $${priceData.price}\n` +
     `${arrowEmoji} 24h: ${change24h >= 0 ? '+' : ''}${priceData.change24h}%\n`;
   
   // Add creator wallet if available
@@ -194,22 +214,41 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
 // Send updates for all user's subscribed tokens
 async function sendUserUpdates(bot, chatId, userPrefs) {
   if (!userPrefs.subscribed) {
+    console.log(`User ${chatId} is not subscribed, skipping updates`);
     return;
   }
+
+  console.log(`Sending updates for user ${chatId}:`, {
+    hasStandardTokens: (userPrefs.tokens || []).length > 0,
+    hasCustomTokens: (userPrefs.customTokens || []).length > 0,
+    tokens: userPrefs.tokens || [],
+    customTokens: (userPrefs.customTokens || []).map(ct => ({ symbol: ct.symbol, address: ct.address?.substring(0, 8) + '...' }))
+  });
 
   // Send standard token updates
   for (const token of userPrefs.tokens || []) {
     if (TOKENS[token]) {
-      await sendPriceUpdate(bot, chatId, token);
-      await new Promise(resolve => setTimeout(resolve, 500));
+      try {
+        await sendPriceUpdate(bot, chatId, token);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.error(`Error sending price update for ${token}:`, error.message);
+      }
     }
   }
   
   // Send custom Solana token updates
   for (const customToken of userPrefs.customTokens || []) {
     if (customToken.address && customToken.symbol) {
-      await sendCustomTokenUpdate(bot, chatId, customToken.address, customToken);
-      await new Promise(resolve => setTimeout(resolve, 500));
+      try {
+        console.log(`Sending update for custom token ${customToken.symbol} (${customToken.address.substring(0, 8)}...)`);
+        await sendCustomTokenUpdate(bot, chatId, customToken.address, customToken);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (error) {
+        console.error(`Error sending custom token update for ${customToken.symbol}:`, error.message, error.stack);
+      }
+    } else {
+      console.warn(`Custom token missing address or symbol:`, customToken);
     }
   }
 }

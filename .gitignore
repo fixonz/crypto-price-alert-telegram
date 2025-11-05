@@ -8,6 +8,8 @@ prices.json
 *.db
 *.db-shm
 *.db-wal
+*.zip
+render.zip
 
 # OS files
 .DS_Store

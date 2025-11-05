@@ -1,20 +1,27 @@
 const fs = require('fs').promises;
 const path = require('path');
 
-// Use SQLite if enabled (default on Render/deployment, can be disabled with USE_JSON_STORAGE=true)
-const USE_SQLITE = process.env.USE_JSON_STORAGE !== 'true';
-
+// Use Postgres (Neon) if DATABASE_URL is set, otherwise fall back to JSON
 let db = null;
-if (USE_SQLITE) {
-  try {
-    const { initDatabase, getDatabase } = require('./database');
-    initDatabase();
-    db = getDatabase();
-    console.log('📊 Using SQLite database for persistent storage');
-  } catch (error) {
-    console.warn('⚠️ SQLite initialization failed, falling back to JSON files:', error.message);
-    db = null;
+let dbInitialized = false;
+
+// Initialize database connection (call this before using db)
+async function ensureDatabaseInitialized() {
+  if (dbInitialized) return;
+  
+  if (process.env.DATABASE_URL && process.env.USE_JSON_STORAGE !== 'true') {
+    try {
+      const { initDatabase } = require('./database');
+      db = await initDatabase();
+      if (db) {
+        console.log('📊 Using Neon Postgres database for persistent storage');
+      }
+    } catch (error) {
+      console.warn('⚠️ Database initialization failed, falling back to JSON files:', error.message);
+      db = null;
+    }
   }
+  dbInitialized = true;
 }
 
 // In-memory cache for temporary flags (like waitingForTokenAddress)
@@ -29,11 +36,16 @@ const PRICES_FILE = path.join(__dirname, '..', 'prices.json');
 
 // Load user preferences
 async function loadUsers() {
+  await ensureDatabaseInitialized();
   if (db) {
     try {
-      const rows = db.prepare('SELECT * FROM users').all();
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query('SELECT * FROM users');
       const users = {};
-      for (const row of rows) {
+      for (const row of result.rows) {
         users[row.chat_id] = {
           subscribed: Boolean(row.subscribed),
           tokens: JSON.parse(row.tokens || '[]'),
@@ -60,29 +72,44 @@ async function loadUsers() {
 
 // Save user preferences
 async function saveUsers(users) {
+  await ensureDatabaseInitialized();
   if (db) {
     try {
-      const stmt = db.prepare(`
-        INSERT INTO users (chat_id, subscribed, tokens, custom_tokens, interval_minutes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET
-          subscribed = excluded.subscribed,
-          tokens = excluded.tokens,
-          custom_tokens = excluded.custom_tokens,
-          interval_minutes = excluded.interval_minutes,
-          updated_at = excluded.updated_at
-      `);
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
       
-      for (const [chatId, user] of Object.entries(users)) {
-        stmt.run(
-          chatId,
-          user.subscribed ? 1 : 0,
-          JSON.stringify(user.tokens || []),
-          JSON.stringify(user.customTokens || []),
-          user.interval || 1,
-          user.createdAt || Date.now(),
-          Date.now()
-        );
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        
+        for (const [chatId, user] of Object.entries(users)) {
+          await client.query(`
+            INSERT INTO users (chat_id, subscribed, tokens, custom_tokens, interval_minutes, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT(chat_id) DO UPDATE SET
+              subscribed = EXCLUDED.subscribed,
+              tokens = EXCLUDED.tokens,
+              custom_tokens = EXCLUDED.custom_tokens,
+              interval_minutes = EXCLUDED.interval_minutes,
+              updated_at = EXCLUDED.updated_at
+          `, [
+            chatId,
+            user.subscribed || false,
+            JSON.stringify(user.tokens || []),
+            JSON.stringify(user.customTokens || []),
+            user.interval || 1,
+            user.createdAt || Date.now(),
+            Date.now()
+          ]);
+        }
+        
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
       }
       return;
     } catch (error) {
@@ -103,11 +130,16 @@ async function saveUsers(users) {
 
 // Load price history
 async function loadPriceHistory() {
+  await ensureDatabaseInitialized();
   if (db) {
     try {
-      const rows = db.prepare('SELECT * FROM price_history').all();
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query('SELECT * FROM price_history');
       const history = {};
-      for (const row of rows) {
+      for (const row of result.rows) {
         history[row.token_key] = {
           price: row.price,
           timestamp: row.timestamp,
@@ -132,24 +164,39 @@ async function loadPriceHistory() {
 
 // Save price history
 async function savePriceHistory(history) {
+  await ensureDatabaseInitialized();
   if (db) {
     try {
-      const stmt = db.prepare(`
-        INSERT INTO price_history (token_key, price, timestamp, history)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(token_key) DO UPDATE SET
-          price = excluded.price,
-          timestamp = excluded.timestamp,
-          history = excluded.history
-      `);
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
       
-      for (const [tokenKey, data] of Object.entries(history)) {
-        stmt.run(
-          tokenKey,
-          data.price || null,
-          data.timestamp || Date.now(),
-          JSON.stringify(data.history || [])
-        );
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        
+        for (const [tokenKey, data] of Object.entries(history)) {
+          await client.query(`
+            INSERT INTO price_history (token_key, price, timestamp, history)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT(token_key) DO UPDATE SET
+              price = EXCLUDED.price,
+              timestamp = EXCLUDED.timestamp,
+              history = EXCLUDED.history
+          `, [
+            tokenKey,
+            data.price || null,
+            data.timestamp || Date.now(),
+            JSON.stringify(data.history || [])
+          ]);
+        }
+        
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
       }
       return;
     } catch (error) {
@@ -209,6 +256,14 @@ async function getUserPreferences(chatId) {
     users[chatId].customTokens = [];
     await saveUsers(users);
   }
+  
+  // Debug: Log what we're loading
+  console.log(`Loading preferences for user ${chatId}:`, {
+    hasTokens: (users[chatId].tokens || []).length > 0,
+    hasCustomTokens: (users[chatId].customTokens || []).length > 0,
+    customTokensCount: (users[chatId].customTokens || []).length,
+    customTokens: (users[chatId].customTokens || []).map(ct => ({ symbol: ct.symbol, address: ct.address?.substring(0, 8) + '...' }))
+  });
   
   // Add temporary flags from cache
   const userPrefs = { ...users[chatId] };

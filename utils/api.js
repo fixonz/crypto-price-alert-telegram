@@ -283,10 +283,8 @@ async function fetchFromFreeCryptoAPI() {
 
     const result = {};
     
-    // Fetch all tokens in parallel (or sequentially if API requires it)
-    const symbols = Object.values(TOKENS).map(t => tokenSymbols[t.id]).filter(Boolean);
-    
-    for (const symbol of symbols) {
+    // Fetch all tokens using their symbols
+    for (const [tokenKey, symbol] of Object.entries(tokenSymbols)) {
       try {
         const response = await axios.get(`https://api.freecryptoapi.com/v1/getData`, {
           params: {
@@ -299,37 +297,26 @@ async function fetchFromFreeCryptoAPI() {
           timeout: 10000
         });
 
-        // Debug: log response structure for first token
-        if (symbol === symbols[0]) {
-          console.log(`FreeCryptoAPI response for ${symbol}:`, JSON.stringify(response.data).substring(0, 200));
-        }
-
-        // Try different response formats
-        let price = null;
-        let change24h = 0;
-
-        if (response.data) {
-          // Try different possible response formats
-          price = response.data.price || response.data.Price || response.data.last || response.data.Last || 
-                  response.data.usd || response.data.USD || response.data.close || response.data.Close;
+        // FreeCryptoAPI returns: {"status":"success","symbols":[{"symbol":"SOL","last":"158.35","daily_change_percentage":"3.18",...}]}
+        if (response.data && response.data.status === 'success' && response.data.symbols && response.data.symbols.length > 0) {
+          const symbolData = response.data.symbols[0]; // Get first symbol from array
           
-          change24h = response.data.change24h || response.data.change_24h || response.data.Change24h ||
-                      response.data['24h_change'] || response.data.percent_change_24h || 
-                      response.data.percentChange24h || 0;
-        }
-
-        if (price !== null && price !== undefined) {
-          // Find the token ID for this symbol
-          const tokenId = Object.keys(tokenSymbols).find(id => tokenSymbols[id] === symbol);
-          if (tokenId && TOKENS[tokenId]) {
-            result[tokenId] = {
-              usd: parseFloat(price),
-              usd_24h_change: parseFloat(change24h || 0)
-            };
-            console.log(`✅ Fetched ${symbol}: $${parseFloat(price).toFixed(2)}`);
+          if (symbolData && symbolData.last) {
+            const price = parseFloat(symbolData.last);
+            const change24h = parseFloat(symbolData.daily_change_percentage || 0);
+            
+            if (TOKENS[tokenKey]) {
+              result[tokenKey] = {
+                usd: price,
+                usd_24h_change: change24h
+              };
+              console.log(`✅ Fetched ${symbol}: $${price.toFixed(2)} (${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}%)`);
+            }
+          } else {
+            console.warn(`FreeCryptoAPI: No price data for ${symbol}`);
           }
         } else {
-          console.warn(`FreeCryptoAPI: No price found in response for ${symbol}`);
+          console.warn(`FreeCryptoAPI: Unexpected response format for ${symbol}:`, JSON.stringify(response.data).substring(0, 200));
         }
         
         // Small delay between requests

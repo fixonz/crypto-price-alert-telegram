@@ -344,7 +344,20 @@ async function handleTokenAddress(bot, msg) {
       addedAt: Date.now()
     });
     
+    // Update the users object to ensure changes are reflected
+    users[chatId] = userPrefs;
+    
+    console.log(`Adding token ${tokenInfo.symbol} to user ${chatId}. Custom tokens now:`, userPrefs.customTokens.length);
+    console.log(`Token data:`, { symbol: tokenInfo.symbol, address: tokenAddress.substring(0, 8) + '...', marketCap: tokenInfo.marketCap });
+    
     clearTempFlag(chatId, 'waitingForTokenAddress');
+    
+    // Save users to database/JSON
+    await saveUsers(users);
+    console.log(`✅ Saved token ${tokenInfo.symbol} for user ${chatId}. Verified:`, {
+      customTokensCount: users[chatId].customTokens?.length || 0,
+      hasMarketCap: !!users[chatId].customTokens?.[0]?.marketCap
+    });
     
     // Don't schedule yet - wait for user to choose interval
     // scheduleUserUpdates will be called after interval selection
