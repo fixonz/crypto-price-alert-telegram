@@ -3,6 +3,26 @@ const { formatPriceMessage, formatAlertMessage } = require('../utils/messages');
 const { TOKENS } = require('../config/tokens');
 const { loadUsers, saveUsers, loadPriceHistory, savePriceHistory } = require('../utils/storage');
 
+// Helper function to format market cap with k/M/B suffixes
+function formatMarketCap(value) {
+  if (value >= 1e9) {
+    return `$${(value / 1e9).toFixed(2)}B`;
+  } else if (value >= 1e6) {
+    return `$${(value / 1e6).toFixed(2)}M`;
+  } else if (value >= 1e3) {
+    return `$${(value / 1e3).toFixed(2)}k`;
+  }
+  return `$${value.toFixed(2)}`;
+}
+
+// Helper function to calculate market cap from price (1B supply for Solana tokens)
+function calculateMarketCapFromPrice(price) {
+  const priceNum = parseFloat(price);
+  if (isNaN(priceNum) || priceNum <= 0) return null;
+  // Solana tokens have 1B supply
+  return priceNum * 1e9;
+}
+
 // Send price update to user
 async function sendPriceUpdate(bot, chatId, token) {
   const priceData = await getTokenPrice(TOKENS[token].id);
@@ -211,8 +231,13 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
   const utcTime = new Date().toUTCString().split(' ')[4];
   
   // Format market cap for message header (visible in chat list)
-  const mcapText = currentTokenInfo.marketCap 
-    ? `$${currentTokenInfo.marketCap.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+  // Calculate from price if market cap not available (Solana tokens have 1B supply)
+  let marketCap = currentTokenInfo.marketCap;
+  if (!marketCap) {
+    marketCap = calculateMarketCapFromPrice(priceData.price);
+  }
+  const mcapText = marketCap 
+    ? formatMarketCap(marketCap)
     : 'N/A';
   
   // Build message with market cap in header (visible in chat list) - no price, just mcap
@@ -230,9 +255,9 @@ async function sendCustomTokenUpdate(bot, chatId, tokenAddress, tokenInfo) {
     message += `\n👥 *Holders:* ${currentTokenInfo.holders.count.toLocaleString()}`;
   }
   
-  // Add market cap if available
-  if (currentTokenInfo.marketCap) {
-    message += `\n💰 *Market Cap:* $${currentTokenInfo.marketCap.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  // Add market cap if available (use calculated one if original not available)
+  if (marketCap) {
+    message += `\n💰 *Market Cap:* ${formatMarketCap(marketCap)}`;
   }
   
   // Add transaction data if available (from pump.fun market activity)
