@@ -1,5 +1,5 @@
 const { TOKENS, VALID_INTERVALS } = require('../config/tokens');
-const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUserCount, getActiveUserCount } = require('../utils/storage');
+const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUserCount, getActiveUserCount, setTempFlag, getTempFlag, clearTempFlag } = require('../utils/storage');
 const { getSolanaTokenInfo } = require('../utils/api');
 const { scheduleUserUpdates } = require('../services/scheduler');
 const { notifyAdminNewUser } = require('./admin');
@@ -194,19 +194,8 @@ async function handleAddToken(bot, msg) {
     { parse_mode: 'Markdown' }
   );
   
-  // Store that we're waiting for token address
-  const users = await loadUsers();
-  if (!users[chatId]) {
-    users[chatId] = {
-      subscribed: true,
-      tokens: [],
-      customTokens: [],
-      interval: 1,
-      createdAt: Date.now()
-    };
-  }
-  users[chatId].waitingForTokenAddress = true;
-  await saveUsers(users);
+    // Store that we're waiting for token address (using temp flag)
+    setTempFlag(chatId, 'waitingForTokenAddress', true);
 }
 
 // Cancel command
@@ -289,15 +278,25 @@ async function handleTokenAddress(bot, msg) {
   const chatId = msg.chat.id;
   const text = msg.text;
   
-  const users = await loadUsers();
-  const userPrefs = users[chatId];
+  // Skip if no text
+  if (!text || text.trim().length === 0) {
+    return;
+  }
   
-  // Check if user is waiting for token address
-  if (userPrefs?.waitingForTokenAddress && text) {
+  try {
+    // Check if user is waiting for token address (using temp flag cache)
+    if (!getTempFlag(chatId, 'waitingForTokenAddress')) {
+      // Not waiting for token address, ignore
+      return;
+    }
+    
+    const users = await loadUsers();
+    const userPrefs = users[chatId];
     const tokenAddress = text.trim();
     
     // Validate Solana address format (base58, 32-44 characters)
     if (tokenAddress.length < 32 || tokenAddress.length > 44) {
+      clearTempFlag(chatId, 'waitingForTokenAddress');
       await bot.sendMessage(chatId, '❌ Invalid Solana address format. Please send a valid Solana token address (32-44 characters).');
       return;
     }
@@ -305,10 +304,9 @@ async function handleTokenAddress(bot, msg) {
     await bot.sendMessage(chatId, '⏳ Fetching token information...');
     
     // Check if token already exists
-    const existingToken = userPrefs.customTokens?.find(ct => ct.address === tokenAddress);
+    const existingToken = userPrefs?.customTokens?.find(ct => ct.address === tokenAddress);
     if (existingToken) {
-      delete users[chatId].waitingForTokenAddress;
-      await saveUsers(users);
+      clearTempFlag(chatId, 'waitingForTokenAddress');
       await bot.sendMessage(chatId, `❌ Token ${existingToken.symbol} is already in your list.`);
       return;
     }
@@ -316,8 +314,7 @@ async function handleTokenAddress(bot, msg) {
     // Fetch token info
     const tokenInfo = await getSolanaTokenInfo(tokenAddress);
     if (!tokenInfo) {
-      delete users[chatId].waitingForTokenAddress;
-      await saveUsers(users);
+      clearTempFlag(chatId, 'waitingForTokenAddress');
       await bot.sendMessage(chatId, '❌ Token not found. Please check the address and try again.');
       return;
     }
@@ -347,8 +344,7 @@ async function handleTokenAddress(bot, msg) {
       addedAt: Date.now()
     });
     
-    delete users[chatId].waitingForTokenAddress;
-    await saveUsers(users);
+    clearTempFlag(chatId, 'waitingForTokenAddress');
     
     // Don't schedule yet - wait for user to choose interval
     // scheduleUserUpdates will be called after interval selection
@@ -400,10 +396,13 @@ async function handleTokenAddress(bot, msg) {
       ]
     };
     
-    await bot.sendMessage(chatId, '⏰ *Choose Update Interval*\n\nHow often do you want to receive price updates for this token?', {
+      await bot.sendMessage(chatId, '⏰ *Choose Update Interval*\n\nHow often do you want to receive price updates for this token?', {
       reply_markup: keyboard,
       parse_mode: 'Markdown'
     });
+  } catch (error) {
+    console.error('Error handling token address:', error);
+    await bot.sendMessage(chatId, '❌ An error occurred while processing the token address. Please try again.');
   }
 }
 

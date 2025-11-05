@@ -299,21 +299,46 @@ async function fetchFromFreeCryptoAPI() {
           timeout: 10000
         });
 
-        if (response.data && response.data.price !== undefined) {
+        // Debug: log response structure for first token
+        if (symbol === symbols[0]) {
+          console.log(`FreeCryptoAPI response for ${symbol}:`, JSON.stringify(response.data).substring(0, 200));
+        }
+
+        // Try different response formats
+        let price = null;
+        let change24h = 0;
+
+        if (response.data) {
+          // Try different possible response formats
+          price = response.data.price || response.data.Price || response.data.last || response.data.Last || 
+                  response.data.usd || response.data.USD || response.data.close || response.data.Close;
+          
+          change24h = response.data.change24h || response.data.change_24h || response.data.Change24h ||
+                      response.data['24h_change'] || response.data.percent_change_24h || 
+                      response.data.percentChange24h || 0;
+        }
+
+        if (price !== null && price !== undefined) {
           // Find the token ID for this symbol
           const tokenId = Object.keys(tokenSymbols).find(id => tokenSymbols[id] === symbol);
           if (tokenId && TOKENS[tokenId]) {
             result[tokenId] = {
-              usd: parseFloat(response.data.price),
-              usd_24h_change: parseFloat(response.data.change24h || response.data.change_24h || 0)
+              usd: parseFloat(price),
+              usd_24h_change: parseFloat(change24h || 0)
             };
+            console.log(`✅ Fetched ${symbol}: $${parseFloat(price).toFixed(2)}`);
           }
+        } else {
+          console.warn(`FreeCryptoAPI: No price found in response for ${symbol}`);
         }
         
         // Small delay between requests
         await new Promise(resolve => setTimeout(resolve, 200));
       } catch (error) {
-        console.warn(`FreeCryptoAPI: Failed to fetch ${symbol}:`, error.message);
+        console.error(`FreeCryptoAPI: Failed to fetch ${symbol}:`, error.response?.status, error.response?.statusText, error.message);
+        if (error.response?.data) {
+          console.error(`Response data:`, JSON.stringify(error.response.data).substring(0, 200));
+        }
       }
     }
     

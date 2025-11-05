@@ -79,12 +79,18 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'Telegram Crypto Price Bot',
-    uptime: process.uptime()
+    uptime: Math.round(process.uptime()),
+    timestamp: new Date().toISOString()
   });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    uptime: Math.round(process.uptime()),
+    service: 'Telegram Crypto Price Bot'
+  });
 });
 
 app.listen(PORT, () => {

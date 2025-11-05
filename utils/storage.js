@@ -17,6 +17,10 @@ if (USE_SQLITE) {
   }
 }
 
+// In-memory cache for temporary flags (like waitingForTokenAddress)
+// This is needed because SQLite doesn't store temporary flags
+const tempFlagsCache = {};
+
 // User preferences file (fallback)
 const USERS_FILE = path.join(__dirname, '..', 'users.json');
 
@@ -205,7 +209,34 @@ async function getUserPreferences(chatId) {
     users[chatId].customTokens = [];
     await saveUsers(users);
   }
-  return { ...users[chatId], isNew };
+  
+  // Add temporary flags from cache
+  const userPrefs = { ...users[chatId] };
+  if (tempFlagsCache[chatId]) {
+    Object.assign(userPrefs, tempFlagsCache[chatId]);
+  }
+  
+  return { ...userPrefs, isNew };
+}
+
+// Set temporary flag (for waitingForTokenAddress, etc.)
+function setTempFlag(chatId, flag, value) {
+  if (!tempFlagsCache[chatId]) {
+    tempFlagsCache[chatId] = {};
+  }
+  tempFlagsCache[chatId][flag] = value;
+}
+
+// Get temporary flag
+function getTempFlag(chatId, flag) {
+  return tempFlagsCache[chatId]?.[flag];
+}
+
+// Clear temporary flag
+function clearTempFlag(chatId, flag) {
+  if (tempFlagsCache[chatId]) {
+    delete tempFlagsCache[chatId][flag];
+  }
 }
 
 // Update user preferences
@@ -238,6 +269,9 @@ module.exports = {
   getActiveUserCount,
   isNewUser,
   getUserPreferences,
-  updateUserPreferences
+  updateUserPreferences,
+  setTempFlag,
+  getTempFlag,
+  clearTempFlag
 };
 

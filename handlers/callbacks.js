@@ -1,5 +1,5 @@
 const { TOKENS, VALID_INTERVALS } = require('../config/tokens');
-const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers } = require('../utils/storage');
+const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, setTempFlag, clearTempFlag } = require('../utils/storage');
 const { scheduleUserUpdates } = require('../services/scheduler');
 const { handleStart } = require('./commands');
 
@@ -274,19 +274,8 @@ async function handleAddTokenFromMenu(bot, query) {
     }
   );
 
-  // Store that we're waiting for token address
-  const users = await loadUsers();
-  if (!users[chatId]) {
-    users[chatId] = {
-      subscribed: true,
-      tokens: [],
-      customTokens: [],
-      interval: 1,
-      createdAt: Date.now()
-    };
-  }
-  users[chatId].waitingForTokenAddress = true;
-  await saveUsers(users);
+  // Store that we're waiting for token address (using temp flag)
+  setTempFlag(chatId, 'waitingForTokenAddress', true);
 }
 
 // Handle remove tokens from menu
