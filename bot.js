@@ -146,28 +146,152 @@ _Time: ${new Date().toLocaleString()}_`;
   }
 }
 
-// Fetch price for a specific token
-async function getTokenPrice(tokenId) {
+// Price cache to reduce API calls
+const priceCache = {};
+const CACHE_TTL = 30 * 1000; // 30 seconds cache
+
+// Token ID mapping for fallback API (CoinCap)
+const TOKEN_MAP = {
+  bitcoin: 'bitcoin',
+  ethereum: 'ethereum',
+  binancecoin: 'binance-coin',
+  solana: 'solana'
+};
+
+// CoinCap API mapping (CoinCap uses different IDs)
+const COINCAP_MAP = {
+  bitcoin: 'bitcoin',
+  ethereum: 'ethereum',
+  binancecoin: 'binancecoin',
+  solana: 'solana'
+};
+
+// Fetch prices from CoinCap (fallback API)
+async function fetchFromCoinCap() {
   try {
-    const response = await axios.get(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${tokenId}&vs_currencies=usd&include_24hr_change=true`
-    );
+    const result = {};
     
-    const data = response.data[tokenId];
-    if (!data) return null;
+    // CoinCap doesn't support batch requests, so fetch individually
+    // But we'll use their rates endpoint which is more efficient
+    const coinCapIds = ['bitcoin', 'ethereum', 'binancecoin', 'solana'];
     
-    const price = data.usd;
-    const change24h = data.usd_24h_change;
+    for (const coinCapId of coinCapIds) {
+      try {
+        const response = await axios.get(`https://api.coincap.io/v2/assets/${coinCapId}`, {
+          timeout: 5000
+        });
+        
+        const coin = response.data.data;
+        
+        // Map CoinCap ID to our token ID
+        let tokenKey = null;
+        if (coinCapId === 'bitcoin') tokenKey = 'bitcoin';
+        else if (coinCapId === 'ethereum') tokenKey = 'ethereum';
+        else if (coinCapId === 'binancecoin') tokenKey = 'binancecoin';
+        else if (coinCapId === 'solana') tokenKey = 'solana';
+        
+        if (tokenKey && TOKENS[tokenKey]) {
+          result[TOKENS[tokenKey].id] = {
+            usd: parseFloat(coin.priceUsd),
+            usd_24h_change: parseFloat(coin.changePercent24Hr) || 0
+          };
+        }
+        
+        // Small delay between requests to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 200));
+      } catch (error) {
+        console.warn(`Failed to fetch ${coinCapId} from CoinCap:`, error.message);
+      }
+    }
     
-    return {
-      price: price.toFixed(2),
-      change24h: change24h ? change24h.toFixed(2) : '0.00',
-      emoji: change24h >= 0 ? '📈' : '📉'
-    };
+    // Return result only if we got at least one price
+    return Object.keys(result).length > 0 ? result : null;
   } catch (error) {
-    console.error(`Error fetching ${tokenId} price:`, error.message);
+    console.error('CoinCap fallback error:', error.message);
     return null;
   }
+}
+
+// Fetch prices for all tokens at once (more efficient)
+async function getAllTokenPrices() {
+  const cacheKey = 'all_prices';
+  const cached = priceCache[cacheKey];
+  
+  // Return cached data if still valid
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.data;
+  }
+  
+  // Try CoinGecko first (primary API)
+  try {
+    // Fetch all tokens in one API call
+    const tokenIds = Object.values(TOKENS).map(t => t.id).join(',');
+    const response = await axios.get(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${tokenIds}&vs_currencies=usd&include_24hr_change=true`,
+      {
+        timeout: 10000,
+        headers: {
+          'Accept': 'application/json'
+        }
+      }
+    );
+    
+    // Cache the results
+    priceCache[cacheKey] = {
+      data: response.data,
+      timestamp: Date.now(),
+      source: 'coingecko'
+    };
+    
+    return response.data;
+  } catch (error) {
+    if (error.response?.status === 429) {
+      console.warn('⚠️ CoinGecko rate limit hit. Trying fallback API...');
+    } else {
+      console.warn(`⚠️ CoinGecko error: ${error.message}. Trying fallback API...`);
+    }
+    
+    // Try fallback API (CoinCap)
+    const fallbackData = await fetchFromCoinCap();
+    if (fallbackData) {
+      console.log('✅ Using CoinCap as fallback');
+      // Cache the fallback results
+      priceCache[cacheKey] = {
+        data: fallbackData,
+        timestamp: Date.now(),
+        source: 'coincap'
+      };
+      return fallbackData;
+    }
+    
+    // If both fail, use cached data if available
+    if (cached) {
+      console.warn('⚠️ Both APIs failed. Using cached data.');
+      return cached.data;
+    }
+    
+    console.error('❌ All price APIs failed and no cache available');
+    return null;
+  }
+}
+
+// Fetch price for a specific token
+async function getTokenPrice(tokenId) {
+  // Try to get from cache first
+  const allPrices = await getAllTokenPrices();
+  if (!allPrices || !allPrices[tokenId]) {
+    return null;
+  }
+  
+  const data = allPrices[tokenId];
+  const price = data.usd;
+  const change24h = data.usd_24h_change;
+  
+  return {
+    price: price.toFixed(2),
+    change24h: change24h ? change24h.toFixed(2) : '0.00',
+    emoji: change24h >= 0 ? '📈' : '📉'
+  };
 }
 
 // Format price message
@@ -254,13 +378,20 @@ async function checkPriceDrops() {
   const priceHistory = await loadPriceHistory();
   const users = await loadUsers();
   
+  // Fetch all prices at once (more efficient)
+  const allPrices = await getAllTokenPrices();
+  if (!allPrices) {
+    console.warn('⚠️ Could not fetch prices, skipping drop check');
+    return;
+  }
+  
   // Check each token
   for (const [tokenKey, tokenInfo] of Object.entries(TOKENS)) {
-    const currentPriceData = await getTokenPrice(tokenInfo.id);
+    if (!allPrices[tokenInfo.id]) continue;
     
-    if (!currentPriceData) continue;
-    
-    const currentPrice = parseFloat(currentPriceData.price);
+    const data = allPrices[tokenInfo.id];
+    const currentPrice = parseFloat(data.usd);
+    const change24h = data.usd_24h_change;
     const lastPrice = priceHistory[tokenKey]?.price;
     
     // Update price history
@@ -277,6 +408,12 @@ async function checkPriceDrops() {
       // If price dropped more than 5%, send alerts to all users who have this token
       if (dropPercentage >= 5) {
         console.log(`🚨 Alert: ${tokenInfo.name} dropped ${dropPercentage.toFixed(2)}% (${lastPrice} -> ${currentPrice})`);
+        
+        const currentPriceData = {
+          price: currentPrice.toFixed(2),
+          change24h: change24h ? change24h.toFixed(2) : '0.00',
+          emoji: change24h >= 0 ? '📈' : '📉'
+        };
         
         // Find all users who have this token and are subscribed
         for (const [chatId, userPrefs] of Object.entries(users)) {
@@ -550,7 +687,12 @@ bot.on('callback_query', async (query) => {
 
 // Handle errors
 bot.on('polling_error', (error) => {
-  console.error('Polling error:', error);
+  // Ignore 409 conflicts during deployment (multiple instances temporarily)
+  if (error.response?.statusCode === 409) {
+    console.warn('⚠️ Telegram conflict: Multiple instances detected. This is normal during deployment and will resolve automatically.');
+    return;
+  }
+  console.error('Polling error:', error.message || error);
 });
 
 // Start Express server for health checks (needed for Render)
@@ -614,12 +756,13 @@ async function initializePriceHistory() {
   const priceHistory = await loadPriceHistory();
   let needsUpdate = false;
   
-  for (const [tokenKey, tokenInfo] of Object.entries(TOKENS)) {
-    if (!priceHistory[tokenKey]) {
-      const priceData = await getTokenPrice(tokenInfo.id);
-      if (priceData) {
+  // Fetch all prices at once
+  const allPrices = await getAllTokenPrices();
+  if (allPrices) {
+    for (const [tokenKey, tokenInfo] of Object.entries(TOKENS)) {
+      if (!priceHistory[tokenKey] && allPrices[tokenInfo.id]) {
         priceHistory[tokenKey] = {
-          price: parseFloat(priceData.price),
+          price: parseFloat(allPrices[tokenInfo.id].usd),
           timestamp: Date.now()
         };
         needsUpdate = true;
@@ -632,8 +775,8 @@ async function initializePriceHistory() {
   }
 }
 
-// Schedule price drop monitoring (runs every minute)
-cron.schedule('* * * * *', async () => {
+// Schedule price drop monitoring (runs every 2 minutes to reduce API calls)
+cron.schedule('*/2 * * * *', async () => {
   await checkPriceDrops();
 });
 
