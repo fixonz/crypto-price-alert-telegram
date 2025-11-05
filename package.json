@@ -1,0 +1,27 @@
+{
+  "name": "solanaprice-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that sends Solana price every minute",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "solana",
+    "crypto",
+    "price"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "axios": "^1.6.2",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  }
+}
+
