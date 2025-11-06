@@ -8,7 +8,7 @@ const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
 // Cache to track last checked transaction signature per KOL
 const lastTransactionCache = {};
 
-// Get recent transactions for a KOL address
+// Get recent transactions for a KOL address using Helius API
 async function getKOLTransactions(kolAddress, limit = 10) {
   try {
     const response = await axios.get(
@@ -22,8 +22,7 @@ async function getKOLTransactions(kolAddress, limit = 10) {
       }
     );
     
-    // Helius API might return data in different formats
-    // Check if it's an array or has a nested structure
+    // Helius API returns transactions in response.data
     let transactions = response.data;
     if (Array.isArray(transactions)) {
       return transactions;
@@ -33,13 +32,16 @@ async function getKOLTransactions(kolAddress, limit = 10) {
       return transactions.data;
     }
     
-    console.log(`⚠️ Unexpected transaction format for ${kolAddress}:`, typeof transactions, transactions ? Object.keys(transactions) : 'null');
+    console.log(`⚠️ Unexpected transaction format from Helius for ${kolAddress}:`, typeof transactions, transactions ? Object.keys(transactions) : 'null');
+    if (transactions && typeof transactions === 'object') {
+      console.log(`  Sample transaction structure:`, JSON.stringify(Object.keys(transactions)).substring(0, 200));
+    }
     return [];
   } catch (error) {
     console.error(`Error fetching transactions for KOL ${kolAddress}:`, error.message);
     if (error.response) {
       console.error(`  API Response status: ${error.response.status}`);
-      console.error(`  API Response data:`, error.response.data);
+      console.error(`  API Response data:`, JSON.stringify(error.response.data).substring(0, 200));
     }
     return [];
   }
@@ -48,7 +50,15 @@ async function getKOLTransactions(kolAddress, limit = 10) {
 // Parse transaction to extract token swap information
 function parseSwapTransaction(tx, kolAddress) {
   try {
-    if (!tx || !tx.transaction || !tx.transaction.message) {
+    if (!tx) {
+      return null;
+    }
+
+    // Extract signature (already done in main loop, but keep for safety)
+    const signature = tx.signature || tx.transaction?.signatures?.[0] || tx.txHash;
+    
+    // Helius standard format
+    if (!tx.transaction || !tx.transaction.message) {
       return null;
     }
 
@@ -58,6 +68,8 @@ function parseSwapTransaction(tx, kolAddress) {
     if (!meta || meta.err) {
       return null; // Failed transaction
     }
+    
+    const blockTime = tx.blockTime;
 
     // Get the KOL's account index from the transaction
     // The accountKeys can be strings or objects with pubkey property
@@ -175,8 +187,8 @@ function parseSwapTransaction(tx, kolAddress) {
     
     if (swapType && tokenMint) {
       return {
-        signature: transaction.signatures?.[0] || '',
-        timestamp: tx.blockTime ? new Date(tx.blockTime * 1000) : new Date(),
+        signature: signature || '',
+        timestamp: blockTime ? new Date(blockTime * 1000) : new Date(),
         type: swapType, // 'buy' or 'sell'
         tokenMint: tokenMint,
         tokenAmount: amount,
@@ -253,6 +265,18 @@ async function checkKOLTransactions(bot) {
         
         console.log(`  📊 Found ${transactions.length} transactions for ${kolName}`);
         
+        // Log first transaction structure for debugging
+        if (transactions.length > 0) {
+          const firstTx = transactions[0];
+          console.log(`  🔍 Sample transaction structure:`, {
+            hasSignature: !!firstTx.signature,
+            hasTxHash: !!firstTx.txHash,
+            hasTransaction: !!firstTx.transaction,
+            hasTransactionSignatures: !!(firstTx.transaction?.signatures?.[0]),
+            keys: Object.keys(firstTx).slice(0, 10)
+          });
+        }
+        
         // Get last checked signature for this KOL
         const lastSignature = lastTransactionCache[kolAddress];
         console.log(`  🔑 Last processed signature: ${lastSignature ? lastSignature.substring(0, 16) + '...' : 'None (first check - will process all)'}`);
@@ -262,10 +286,31 @@ async function checkKOLTransactions(bot) {
         
         // Process transactions (newest first)
         for (const tx of transactions) {
-          const signature = tx.transaction?.signatures?.[0];
+          // Try multiple possible signature locations (Helius format variations)
+          let signature = null;
+          
+          // Try direct signature first
+          if (tx.signature) {
+            signature = tx.signature;
+          } 
+          // Try transaction.signatures array
+          else if (tx.transaction?.signatures && Array.isArray(tx.transaction.signatures) && tx.transaction.signatures.length > 0) {
+            signature = tx.transaction.signatures[0];
+          }
+          // Try transaction.signature (singular)
+          else if (tx.transaction?.signature) {
+            signature = tx.transaction.signature;
+          }
+          // Try txHash (Solscan format)
+          else if (tx.txHash) {
+            signature = tx.txHash;
+          }
           
           if (!signature) {
-            console.log(`  ⚠️ Transaction missing signature`);
+            console.log(`  ⚠️ Transaction missing signature. Keys:`, Object.keys(tx).join(', '));
+            if (tx.transaction) {
+              console.log(`    Transaction keys:`, Object.keys(tx.transaction).join(', '));
+            }
             continue;
           }
           
