@@ -41,6 +41,10 @@ async function handleCallbackQuery(bot, query) {
   } else if (data === 'menu_back') {
     await handleStart(bot, { chat: { id: chatId } });
     return;
+  } else if (data === 'menu_kols') {
+    await sendKOLListPage(bot, chatId, 1);
+    await bot.answerCallbackQuery(query.id);
+    return;
   } else if (data.startsWith('remove_main_')) {
     const token = data.replace('remove_main_', '');
     const userInfo = await getUserPreferences(chatId);
@@ -86,27 +90,55 @@ async function handleCallbackQuery(bot, query) {
       return;
     }
     
+    // Check if user has reached the limit of 2 KOLs
+    if (trackedKOLs.length >= 2) {
+      await bot.answerCallbackQuery(query.id, { 
+        text: `❌ Maximum limit reached! You can only track 2 KOLs at a time. Please untrack one first.`,
+        show_alert: true
+      });
+      return;
+    }
+    
     trackedKOLs.push(kolAddress);
     await updateUserPreferences(chatId, { trackedKOLs });
     
-    // Update button to show "Tracking"
-    const keyboard = {
-      inline_keyboard: [[
-        {
-          text: '✅ Tracking',
-          callback_data: `kol_untrack_${kolAddress}`
-        }
-      ]]
-    };
+    // Check if this is from the KOL list page or individual KOL view
+    const messageText = query.message.text || query.message.caption || '';
+    const isListPage = messageText.includes('KOL List');
     
-    try {
-      await bot.editMessageReplyMarkup(keyboard, {
-        chat_id: chatId,
-        message_id: query.message.message_id
-      });
-      await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
-    } catch (error) {
-      await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
+    if (isListPage) {
+      // Refresh the entire list page to show updated status
+      try {
+        // Extract page number from message or default to 1
+        const pageMatch = messageText.match(/Page (\d+) of/);
+        const currentPage = pageMatch ? parseInt(pageMatch[1]) : 1;
+        
+        await bot.deleteMessage(chatId, query.message.message_id);
+        await sendKOLListPage(bot, chatId, currentPage);
+        await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
+      } catch (error) {
+        await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
+      }
+    } else {
+      // Individual KOL view - just update the button
+      const keyboard = {
+        inline_keyboard: [[
+          {
+            text: '✅ Tracking',
+            callback_data: `kol_untrack_${kolAddress}`
+          }
+        ]]
+      };
+      
+      try {
+        await bot.editMessageReplyMarkup(keyboard, {
+          chat_id: chatId,
+          message_id: query.message.message_id
+        });
+        await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
+      } catch (error) {
+        await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
+      }
     }
     return;
   } else if (data.startsWith('kol_untrack_')) {
@@ -126,24 +158,43 @@ async function handleCallbackQuery(bot, query) {
     const updatedKOLs = trackedKOLs.filter(addr => addr !== kolAddress);
     await updateUserPreferences(chatId, { trackedKOLs: updatedKOLs });
     
-    // Update button to show "Track KOL"
-    const keyboard = {
-      inline_keyboard: [[
-        {
-          text: '➕ Track KOL',
-          callback_data: `kol_track_${kolAddress}`
-        }
-      ]]
-    };
+    // Check if this is from the KOL list page or individual KOL view
+    const messageText = query.message.text || query.message.caption || '';
+    const isListPage = messageText.includes('KOL List');
     
-    try {
-      await bot.editMessageReplyMarkup(keyboard, {
-        chat_id: chatId,
-        message_id: query.message.message_id
-      });
-      await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
-    } catch (error) {
-      await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
+    if (isListPage) {
+      // Refresh the entire list page to show updated status
+      try {
+        // Extract page number from message or default to 1
+        const pageMatch = messageText.match(/Page (\d+) of/);
+        const currentPage = pageMatch ? parseInt(pageMatch[1]) : 1;
+        
+        await bot.deleteMessage(chatId, query.message.message_id);
+        await sendKOLListPage(bot, chatId, currentPage);
+        await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
+      } catch (error) {
+        await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
+      }
+    } else {
+      // Individual KOL view - just update the button
+      const keyboard = {
+        inline_keyboard: [[
+          {
+            text: '➕ Track KOL',
+            callback_data: `kol_track_${kolAddress}`
+          }
+        ]]
+      };
+      
+      try {
+        await bot.editMessageReplyMarkup(keyboard, {
+          chat_id: chatId,
+          message_id: query.message.message_id
+        });
+        await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
+      } catch (error) {
+        await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
+      }
     }
     return;
   } else if (data.startsWith('remove_solana_')) {

@@ -33,12 +33,13 @@ async function handleStart(bot, msg) {
   // Show tracked tokens
   const standardTokens = prefs.tokens || [];
   const customTokens = prefs.customTokens || [];
+  const trackedKOLs = prefs.trackedKOLs || [];
   
-  if (standardTokens.length === 0 && customTokens.length === 0) {
+  if (standardTokens.length === 0 && customTokens.length === 0 && trackedKOLs.length === 0) {
     statusMessage += `📊 <b>Your Tracking Status</b>\n\n`;
-    statusMessage += `🔸 <b>No tokens tracked yet</b>\n`;
+    statusMessage += `🔸 <b>No tokens or KOLs tracked yet</b>\n`;
   } else {
-    statusMessage += `Tracking tokens:\n\n`;
+    statusMessage += `Tracking:\n\n`;
     
     // Build token list for code/quote view
     let tokenList = [];
@@ -62,11 +63,25 @@ async function handleStart(bot, msg) {
     
     // Display tokens in code block format
     if (tokenList.length > 0) {
-      statusMessage += `<code>${tokenList.join('\n')}</code>\n`;
+      statusMessage += `<b>Tokens:</b>\n<code>${tokenList.join('\n')}</code>\n\n`;
+    }
+    
+    // Show tracked KOLs
+    if (trackedKOLs.length > 0) {
+      const kolNames = [];
+      trackedKOLs.forEach(address => {
+        const names = KOL_ADDRESSES[address];
+        if (names && names.length > 0) {
+          kolNames.push(names[0]);
+        }
+      });
+      if (kolNames.length > 0) {
+        statusMessage += `<b>KOLs:</b>\n<code>${kolNames.join('\n')}</code>\n\n`;
+      }
     }
   }
 
-  statusMessage += `\n⏰ <b>Update Interval:</b> ${prefs.interval || 1} minute${(prefs.interval || 1) > 1 ? 's' : ''}`;
+  statusMessage += `⏰ <b>Update Interval:</b> ${prefs.interval || 1} minute${(prefs.interval || 1) > 1 ? 's' : ''}`;
   statusMessage += `\n🔔 <b>Status:</b> ${prefs.subscribed ? '✅ Active' : '❌ Inactive'}`;
   statusMessage += `\n\n🚨 <b>Instant Alerts:</b> Price drops of 20%+ (Solana) or 5%+ (main tokens) are sent immediately!`;
 
@@ -78,7 +93,10 @@ async function handleStart(bot, msg) {
         { text: '➕ Add Solana Token', callback_data: 'menu_add_solana' }
       ],
       [
-        { text: '➖ Remove Tokens', callback_data: 'menu_remove' },
+        { text: '👥 Browse KOLs', callback_data: 'menu_kols' },
+        { text: '➖ Remove Tokens', callback_data: 'menu_remove' }
+      ],
+      [
         { text: '⏰ Change Interval', callback_data: 'menu_interval' }
       ],
       [
@@ -595,8 +613,11 @@ async function handleKOL(bot, msg) {
   }
 }
 
-// Helper function to send KOL list page with pagination
+// Helper function to send KOL list page with pagination and track buttons
 async function sendKOLListPage(bot, chatId, page = 1) {
+  const userPrefs = await getUserPreferences(chatId);
+  const trackedKOLs = userPrefs.trackedKOLs || [];
+  
   const kolList = [];
   for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
     const primaryName = names[0];
@@ -606,8 +627,8 @@ async function sendKOLListPage(bot, chatId, page = 1) {
   // Sort alphabetically by name
   kolList.sort((a, b) => a.name.localeCompare(b.name));
   
-  // Split into pages (30 KOLs per page to stay under 4096 char limit)
-  const itemsPerPage = 30;
+  // Split into pages (20 KOLs per page to fit buttons)
+  const itemsPerPage = 20;
   const totalPages = Math.ceil(kolList.length / itemsPerPage);
   const currentPage = Math.max(1, Math.min(page, totalPages)); // Clamp between 1 and totalPages
   
@@ -615,14 +636,29 @@ async function sendKOLListPage(bot, chatId, page = 1) {
   const endIdx = startIdx + itemsPerPage;
   const pageItems = kolList.slice(startIdx, endIdx);
   
-  const listText = pageItems.map(item => `• ${item.name}`).join('\n');
-  const message = `📋 <b>KOL Addresses</b> (${startIdx + 1}-${Math.min(endIdx, kolList.length)} of ${kolList.length})\n\n<code>${listText}</code>\n\n💡 Use /kol [name] to get a specific address`;
+  const message = `👥 <b>KOL List</b> (${startIdx + 1}-${Math.min(endIdx, kolList.length)} of ${kolList.length})\n\n💡 Click a KOL to track/untrack them\n\n📄 Page ${currentPage} of ${totalPages}`;
   
-  // Create pagination buttons
+  // Create keyboard with KOL buttons (2 columns)
   const keyboard = {
     inline_keyboard: []
   };
   
+  // Add KOL buttons in rows of 2
+  for (let i = 0; i < pageItems.length; i += 2) {
+    const row = [];
+    for (let j = 0; j < 2 && i + j < pageItems.length; j++) {
+      const item = pageItems[i + j];
+      const isTracking = trackedKOLs.includes(item.address);
+      const buttonText = isTracking ? `✅ ${item.name}` : item.name;
+      row.push({
+        text: buttonText,
+        callback_data: isTracking ? `kol_untrack_${item.address}` : `kol_track_${item.address}`
+      });
+    }
+    keyboard.inline_keyboard.push(row);
+  }
+  
+  // Add pagination buttons
   const navButtons = [];
   if (currentPage > 1) {
     navButtons.push({
@@ -645,6 +681,12 @@ async function sendKOLListPage(bot, chatId, page = 1) {
   keyboard.inline_keyboard.push([{
     text: `Page ${currentPage} of ${totalPages}`,
     callback_data: 'kol_page_info'
+  }]);
+  
+  // Add back button
+  keyboard.inline_keyboard.push([{
+    text: '🔙 Back to Menu',
+    callback_data: 'menu_back'
   }]);
   
   await bot.sendMessage(chatId, message, {
@@ -706,6 +748,14 @@ async function handleTrackKOL(bot, msg) {
     const trackedKOLs = userPrefs.trackedKOLs || [];
     if (trackedKOLs.includes(foundAddress)) {
       await bot.sendMessage(chatId, `✅ You're already tracking <b>${foundName}</b>!`, {
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+    
+    // Check if user has reached the limit of 2 KOLs
+    if (trackedKOLs.length >= 2) {
+      await bot.sendMessage(chatId, `❌ Maximum limit reached! You can only track 2 KOLs at a time. Please use /untrackkol to remove one first.`, {
         parse_mode: 'HTML'
       });
       return;
