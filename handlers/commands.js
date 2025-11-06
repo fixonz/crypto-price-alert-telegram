@@ -512,31 +512,8 @@ async function handleKOL(bot, msg) {
   
   try {
     if (!args) {
-      // List all KOLs with pagination
-      const kolList = [];
-      for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
-        const primaryName = names[0];
-        kolList.push({ name: primaryName, address });
-      }
-      
-      // Sort alphabetically by name
-      kolList.sort((a, b) => a.name.localeCompare(b.name));
-      
-      // Split into pages (30 KOLs per page to stay under 4096 char limit)
-      const itemsPerPage = 30;
-      const totalPages = Math.ceil(kolList.length / itemsPerPage);
-      const page = 1; // Default to first page
-      
-      const startIdx = (page - 1) * itemsPerPage;
-      const endIdx = startIdx + itemsPerPage;
-      const pageItems = kolList.slice(startIdx, endIdx);
-      
-      const listText = pageItems.map(item => `• ${item.name}`).join('\n');
-      const message = `📋 <b>KOL Addresses</b> (${startIdx + 1}-${Math.min(endIdx, kolList.length)} of ${kolList.length})\n\n<code>${listText}</code>\n\n💡 Use /kol [name] to get a specific address\n📄 Showing page ${page} of ${totalPages}`;
-      
-      await bot.sendMessage(chatId, message, {
-        parse_mode: 'HTML'
-      });
+      // List all KOLs with pagination (page 1 by default)
+      await sendKOLListPage(bot, chatId, 1);
     } else {
       // Search for specific KOL
       const searchName = args.toLowerCase();
@@ -573,20 +550,37 @@ async function handleKOL(bot, msg) {
         // Get profile image from kolscan.io CDN
         const profileImageUrl = `https://cdn.kolscan.io/profiles/${foundAddress}.png`;
         
+        // Check if user is already tracking this KOL
+        const userPrefs = await getUserPreferences(chatId);
+        const trackedKOLs = userPrefs.trackedKOLs || [];
+        const isTracking = trackedKOLs.includes(foundAddress);
+        
         const message = `👤 <b>${foundName}</b>\n\n<code>${foundAddress}</code>\n\n🔗 <a href="https://kolscan.io/account/${foundAddress}">View on Kolscan</a> | <a href="https://solscan.io/account/${foundAddress}">Solscan</a>`;
+        
+        // Create inline keyboard with Track/Untrack button
+        const keyboard = {
+          inline_keyboard: [[
+            {
+              text: isTracking ? '✅ Tracking' : '➕ Track KOL',
+              callback_data: isTracking ? `kol_untrack_${foundAddress}` : `kol_track_${foundAddress}`
+            }
+          ]]
+        };
         
         try {
           // Try to send with photo first
           await bot.sendPhoto(chatId, profileImageUrl, {
             caption: message,
-            parse_mode: 'HTML'
+            parse_mode: 'HTML',
+            reply_markup: keyboard
           });
         } catch (photoError) {
           // If photo fails (404 or other error), send text only
           console.log(`Could not load profile image for ${foundName}:`, photoError.message);
           await bot.sendMessage(chatId, message, {
             parse_mode: 'HTML',
-            disable_web_page_preview: true
+            disable_web_page_preview: true,
+            reply_markup: keyboard
           });
         }
       } else {
@@ -599,6 +593,64 @@ async function handleKOL(bot, msg) {
     console.error('Error handling KOL command:', error);
     await bot.sendMessage(chatId, '❌ An error occurred while processing the KOL command.');
   }
+}
+
+// Helper function to send KOL list page with pagination
+async function sendKOLListPage(bot, chatId, page = 1) {
+  const kolList = [];
+  for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+    const primaryName = names[0];
+    kolList.push({ name: primaryName, address });
+  }
+  
+  // Sort alphabetically by name
+  kolList.sort((a, b) => a.name.localeCompare(b.name));
+  
+  // Split into pages (30 KOLs per page to stay under 4096 char limit)
+  const itemsPerPage = 30;
+  const totalPages = Math.ceil(kolList.length / itemsPerPage);
+  const currentPage = Math.max(1, Math.min(page, totalPages)); // Clamp between 1 and totalPages
+  
+  const startIdx = (currentPage - 1) * itemsPerPage;
+  const endIdx = startIdx + itemsPerPage;
+  const pageItems = kolList.slice(startIdx, endIdx);
+  
+  const listText = pageItems.map(item => `• ${item.name}`).join('\n');
+  const message = `📋 <b>KOL Addresses</b> (${startIdx + 1}-${Math.min(endIdx, kolList.length)} of ${kolList.length})\n\n<code>${listText}</code>\n\n💡 Use /kol [name] to get a specific address`;
+  
+  // Create pagination buttons
+  const keyboard = {
+    inline_keyboard: []
+  };
+  
+  const navButtons = [];
+  if (currentPage > 1) {
+    navButtons.push({
+      text: '◀️ Previous',
+      callback_data: `kol_page_${currentPage - 1}`
+    });
+  }
+  if (currentPage < totalPages) {
+    navButtons.push({
+      text: 'Next ▶️',
+      callback_data: `kol_page_${currentPage + 1}`
+    });
+  }
+  
+  if (navButtons.length > 0) {
+    keyboard.inline_keyboard.push(navButtons);
+  }
+  
+  // Add page indicator button
+  keyboard.inline_keyboard.push([{
+    text: `Page ${currentPage} of ${totalPages}`,
+    callback_data: 'kol_page_info'
+  }]);
+  
+  await bot.sendMessage(chatId, message, {
+    parse_mode: 'HTML',
+    reply_markup: keyboard
+  });
 }
 
 // Handle track KOL command
@@ -764,6 +816,7 @@ module.exports = {
   handleSOL,
   handleKOL,
   handleTrackKOL,
-  handleUntrackKOL
+  handleUntrackKOL,
+  sendKOLListPage
 };
 

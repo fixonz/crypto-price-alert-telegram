@@ -22,9 +22,25 @@ async function getKOLTransactions(kolAddress, limit = 10) {
       }
     );
     
-    return response.data || [];
+    // Helius API might return data in different formats
+    // Check if it's an array or has a nested structure
+    let transactions = response.data;
+    if (Array.isArray(transactions)) {
+      return transactions;
+    } else if (transactions && Array.isArray(transactions.transactions)) {
+      return transactions.transactions;
+    } else if (transactions && Array.isArray(transactions.data)) {
+      return transactions.data;
+    }
+    
+    console.log(`⚠️ Unexpected transaction format for ${kolAddress}:`, typeof transactions, transactions ? Object.keys(transactions) : 'null');
+    return [];
   } catch (error) {
     console.error(`Error fetching transactions for KOL ${kolAddress}:`, error.message);
+    if (error.response) {
+      console.error(`  API Response status: ${error.response.status}`);
+      console.error(`  API Response data:`, error.response.data);
+    }
     return [];
   }
 }
@@ -204,33 +220,77 @@ function getKOLName(address) {
 async function checkKOLTransactions(bot) {
   try {
     const users = await loadUsers();
-    const kolAddresses = Object.keys(KOL_ADDRESSES);
     
-    console.log(`Checking transactions for ${kolAddresses.length} KOLs...`);
+    // Get all tracked KOL addresses from all users
+    const trackedKOLAddresses = new Set();
+    for (const [chatId, userPrefs] of Object.entries(users)) {
+      if (userPrefs.subscribed && userPrefs.trackedKOLs) {
+        userPrefs.trackedKOLs.forEach(address => trackedKOLAddresses.add(address));
+      }
+    }
+    
+    // ONLY check explicitly tracked KOLs - don't fetch for all KOLs
+    const kolAddresses = Array.from(trackedKOLAddresses);
+    
+    if (kolAddresses.length === 0) {
+      console.log(`🔍 No KOLs being tracked, skipping transaction check...`);
+      return;
+    }
+    
+    console.log(`🔍 Checking transactions for ${kolAddresses.length} tracked KOL(s)...`);
     
     for (const kolAddress of kolAddresses) {
       try {
-        // Get recent transactions
-        const transactions = await getKOLTransactions(kolAddress, 5);
+        const kolName = getKOLName(kolAddress) || kolAddress.substring(0, 8) + '...';
+        
+        // Get recent transactions (increase limit to catch more)
+        const transactions = await getKOLTransactions(kolAddress, 10);
         
         if (!transactions || transactions.length === 0) {
+          console.log(`  ⚠️ No transactions found for ${kolName}`);
           continue;
         }
         
+        console.log(`  📊 Found ${transactions.length} transactions for ${kolName}`);
+        
         // Get last checked signature for this KOL
         const lastSignature = lastTransactionCache[kolAddress];
+        console.log(`  🔑 Last processed signature: ${lastSignature ? lastSignature.substring(0, 16) + '...' : 'None (first check - will process all)'}`);
+        
+        let newTransactionsFound = 0;
+        let newestSignature = null;
         
         // Process transactions (newest first)
         for (const tx of transactions) {
           const signature = tx.transaction?.signatures?.[0];
           
+          if (!signature) {
+            console.log(`  ⚠️ Transaction missing signature`);
+            continue;
+          }
+          
+          // Track newest signature
+          if (!newestSignature) {
+            newestSignature = signature;
+          }
+          
           // Skip if we've already processed this transaction
           if (lastSignature && signature === lastSignature) {
+            console.log(`  ✅ Reached last processed transaction, stopping`);
             break;
           }
           
+          newTransactionsFound++;
+          console.log(`  🔍 Processing new transaction: ${signature.substring(0, 16)}...`);
+          
           // Parse transaction
           const swapInfo = parseSwapTransaction(tx, kolAddress);
+          
+          if (!swapInfo) {
+            console.log(`  ⚠️ Transaction ${signature.substring(0, 16)}... is not a swap (no token changes detected)`);
+          } else {
+            console.log(`  ✅ Swap detected: ${swapInfo.type} ${swapInfo.tokenMint.substring(0, 8)}... (${swapInfo.tokenAmount} tokens, ${swapInfo.solAmount} SOL)`);
+          }
           
           if (swapInfo && swapInfo.tokenMint) {
             // Get token price to calculate market cap
@@ -245,7 +305,7 @@ async function checkKOLTransactions(bot) {
                 marketCap = tokenPrice * 1e9;
               }
             } catch (error) {
-              console.log(`Could not fetch price for token ${swapInfo.tokenMint}:`, error.message);
+              console.log(`  ⚠️ Could not fetch price for token ${swapInfo.tokenMint}:`, error.message);
             }
             
             // Format market cap helper
@@ -260,12 +320,15 @@ async function checkKOLTransactions(bot) {
             const kolName = getKOLName(kolAddress) || 'Unknown KOL';
             
             // Check all users to see if they're tracking this KOL or this token
+            let alertSent = false;
             for (const [chatId, userPrefs] of Object.entries(users)) {
               if (!userPrefs.subscribed) continue;
               
               const trackedKOLs = userPrefs.trackedKOLs || [];
               const isTrackingKOL = trackedKOLs.includes(kolAddress);
               const isTrackingToken = isTrackedToken(swapInfo.tokenMint, userPrefs);
+              
+              console.log(`  👤 User ${chatId}: tracking KOL=${isTrackingKOL}, tracking token=${isTrackingToken}`);
               
               // Send alert if user is tracking this KOL OR this token
               if (isTrackingKOL || isTrackingToken) {
@@ -296,18 +359,30 @@ async function checkKOLTransactions(bot) {
                     parse_mode: 'HTML',
                     disable_web_page_preview: true
                   });
-                  console.log(`Sent KOL alert to user ${chatId} for ${kolName}'s ${swapInfo.type} of ${tokenSymbol} at ${formatMarketCap(marketCap)}`);
+                  alertSent = true;
+                  console.log(`  ✅ Sent KOL alert to user ${chatId} for ${kolName}'s ${swapInfo.type} of ${tokenSymbol} at ${formatMarketCap(marketCap)}`);
                 } catch (error) {
-                  console.error(`Error sending KOL alert to ${chatId}:`, error.message);
+                  console.error(`  ❌ Error sending KOL alert to ${chatId}:`, error.message);
                 }
               }
             }
+            
+            if (!alertSent) {
+              console.log(`  ⚠️ Swap detected but no users tracking this KOL or token`);
+            }
           }
-          
-          // Update last checked signature
-          if (!lastSignature || signature !== lastSignature) {
-            lastTransactionCache[kolAddress] = signature;
-          }
+        }
+        
+        // Update cache with newest signature after processing all new transactions
+        if (newestSignature && (!lastSignature || newestSignature !== lastSignature)) {
+          lastTransactionCache[kolAddress] = newestSignature;
+          console.log(`  💾 Updated last signature cache for ${kolName}: ${newestSignature.substring(0, 16)}...`);
+        }
+        
+        if (newTransactionsFound > 0) {
+          console.log(`  📈 Processed ${newTransactionsFound} new transactions for ${kolName}`);
+        } else if (lastSignature) {
+          console.log(`  ℹ️ No new transactions for ${kolName} since last check`);
         }
         
         // Small delay to avoid rate limiting

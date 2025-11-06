@@ -1,7 +1,8 @@
 const { TOKENS, VALID_INTERVALS } = require('../config/tokens');
 const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, setTempFlag, clearTempFlag } = require('../utils/storage');
 const { scheduleUserUpdates } = require('../services/scheduler');
-const { handleStart } = require('./commands');
+const { handleStart, sendKOLListPage } = require('./commands');
+const { KOL_ADDRESSES } = require('../config/kol');
 
 // Handle callback queries (inline keyboard buttons)
 async function handleCallbackQuery(bot, query) {
@@ -52,6 +53,97 @@ async function handleCallbackQuery(bot, query) {
       scheduleUserUpdates(bot, chatId, prefs);
       await bot.answerCallbackQuery(query.id, { text: `${TOKENS[token]?.name || token} removed` });
       await handleRemoveTokensFromMenu(bot, query);
+    }
+    return;
+  } else if (data.startsWith('kol_page_')) {
+    // Handle KOL list pagination
+    const page = parseInt(data.replace('kol_page_', ''));
+    if (!isNaN(page) && page > 0) {
+      await sendKOLListPage(bot, chatId, page);
+      await bot.answerCallbackQuery(query.id);
+      // Delete old message
+      try {
+        await bot.deleteMessage(chatId, query.message.message_id);
+      } catch (e) {
+        // Ignore if can't delete
+      }
+      return;
+    } else if (data === 'kol_page_info') {
+      await bot.answerCallbackQuery(query.id, { text: 'Use buttons to navigate pages' });
+      return;
+    }
+  } else if (data.startsWith('kol_track_')) {
+    // Handle track KOL from button
+    const kolAddress = data.replace('kol_track_', '');
+    const kolNames = KOL_ADDRESSES[kolAddress];
+    const kolName = kolNames ? kolNames[0] : 'Unknown';
+    
+    const userPrefs = await getUserPreferences(chatId);
+    const trackedKOLs = userPrefs.trackedKOLs || [];
+    
+    if (trackedKOLs.includes(kolAddress)) {
+      await bot.answerCallbackQuery(query.id, { text: `Already tracking ${kolName}` });
+      return;
+    }
+    
+    trackedKOLs.push(kolAddress);
+    await updateUserPreferences(chatId, { trackedKOLs });
+    
+    // Update button to show "Tracking"
+    const keyboard = {
+      inline_keyboard: [[
+        {
+          text: '✅ Tracking',
+          callback_data: `kol_untrack_${kolAddress}`
+        }
+      ]]
+    };
+    
+    try {
+      await bot.editMessageReplyMarkup(keyboard, {
+        chat_id: chatId,
+        message_id: query.message.message_id
+      });
+      await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
+    } catch (error) {
+      await bot.answerCallbackQuery(query.id, { text: `✅ Now tracking ${kolName}!` });
+    }
+    return;
+  } else if (data.startsWith('kol_untrack_')) {
+    // Handle untrack KOL from button
+    const kolAddress = data.replace('kol_untrack_', '');
+    const kolNames = KOL_ADDRESSES[kolAddress];
+    const kolName = kolNames ? kolNames[0] : 'Unknown';
+    
+    const userPrefs = await getUserPreferences(chatId);
+    const trackedKOLs = userPrefs.trackedKOLs || [];
+    
+    if (!trackedKOLs.includes(kolAddress)) {
+      await bot.answerCallbackQuery(query.id, { text: `Not tracking ${kolName}` });
+      return;
+    }
+    
+    const updatedKOLs = trackedKOLs.filter(addr => addr !== kolAddress);
+    await updateUserPreferences(chatId, { trackedKOLs: updatedKOLs });
+    
+    // Update button to show "Track KOL"
+    const keyboard = {
+      inline_keyboard: [[
+        {
+          text: '➕ Track KOL',
+          callback_data: `kol_track_${kolAddress}`
+        }
+      ]]
+    };
+    
+    try {
+      await bot.editMessageReplyMarkup(keyboard, {
+        chat_id: chatId,
+        message_id: query.message.message_id
+      });
+      await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
+    } catch (error) {
+      await bot.answerCallbackQuery(query.id, { text: `✅ Stopped tracking ${kolName}` });
     }
     return;
   } else if (data.startsWith('remove_solana_')) {
