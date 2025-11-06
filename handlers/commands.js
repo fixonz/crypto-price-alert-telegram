@@ -3,6 +3,7 @@ const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUser
 const { getSolanaTokenInfo, getTokenPrice } = require('../utils/api');
 const { scheduleUserUpdates } = require('../services/scheduler');
 const { notifyAdminNewUser } = require('./admin');
+const { KOL_ADDRESSES, KOL_NAME_TO_ADDRESS } = require('../config/kol');
 
 // Start command - Beautiful menu with status and buttons
 async function handleStart(bot, msg) {
@@ -503,6 +504,250 @@ async function handleSOL(bot, msg) {
   await handleTokenPrice(bot, msg, 'solana');
 }
 
+// Handle KOL command - list KOLs or show address for specific KOL
+async function handleKOL(bot, msg) {
+  const chatId = msg.chat.id;
+  const text = msg.text || '';
+  const args = text.split(' ').slice(1).join(' ').trim();
+  
+  try {
+    if (!args) {
+      // List all KOLs with pagination
+      const kolList = [];
+      for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+        const primaryName = names[0];
+        kolList.push({ name: primaryName, address });
+      }
+      
+      // Sort alphabetically by name
+      kolList.sort((a, b) => a.name.localeCompare(b.name));
+      
+      // Split into pages (30 KOLs per page to stay under 4096 char limit)
+      const itemsPerPage = 30;
+      const totalPages = Math.ceil(kolList.length / itemsPerPage);
+      const page = 1; // Default to first page
+      
+      const startIdx = (page - 1) * itemsPerPage;
+      const endIdx = startIdx + itemsPerPage;
+      const pageItems = kolList.slice(startIdx, endIdx);
+      
+      const listText = pageItems.map(item => `• ${item.name}`).join('\n');
+      const message = `📋 <b>KOL Addresses</b> (${startIdx + 1}-${Math.min(endIdx, kolList.length)} of ${kolList.length})\n\n<code>${listText}</code>\n\n💡 Use /kol [name] to get a specific address\n📄 Showing page ${page} of ${totalPages}`;
+      
+      await bot.sendMessage(chatId, message, {
+        parse_mode: 'HTML'
+      });
+    } else {
+      // Search for specific KOL
+      const searchName = args.toLowerCase();
+      let foundAddress = null;
+      let foundName = null;
+      
+      // Try exact match first
+      if (KOL_NAME_TO_ADDRESS[searchName]) {
+        foundAddress = KOL_NAME_TO_ADDRESS[searchName];
+        // Find the original name
+        for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+          if (address === foundAddress) {
+            foundName = names[0];
+            break;
+          }
+        }
+      } else {
+        // Try partial match (case-insensitive, ignoring special chars)
+        const normalizedSearch = searchName.replace(/[^\w\s]/g, '').trim();
+        for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+          for (const name of names) {
+            const normalizedName = name.toLowerCase().replace(/[^\w\s]/g, '').trim();
+            if (normalizedName.includes(normalizedSearch) || normalizedSearch.includes(normalizedName)) {
+              foundAddress = address;
+              foundName = name;
+              break;
+            }
+          }
+          if (foundAddress) break;
+        }
+      }
+      
+      if (foundAddress && foundName) {
+        // Get profile image from kolscan.io CDN
+        const profileImageUrl = `https://cdn.kolscan.io/profiles/${foundAddress}.png`;
+        
+        const message = `👤 <b>${foundName}</b>\n\n<code>${foundAddress}</code>\n\n🔗 <a href="https://kolscan.io/account/${foundAddress}">View on Kolscan</a> | <a href="https://solscan.io/account/${foundAddress}">Solscan</a>`;
+        
+        try {
+          // Try to send with photo first
+          await bot.sendPhoto(chatId, profileImageUrl, {
+            caption: message,
+            parse_mode: 'HTML'
+          });
+        } catch (photoError) {
+          // If photo fails (404 or other error), send text only
+          console.log(`Could not load profile image for ${foundName}:`, photoError.message);
+          await bot.sendMessage(chatId, message, {
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+          });
+        }
+      } else {
+        await bot.sendMessage(chatId, `❌ KOL "${args}" not found. Use /kol to see all available KOLs.`, {
+          parse_mode: 'HTML'
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Error handling KOL command:', error);
+    await bot.sendMessage(chatId, '❌ An error occurred while processing the KOL command.');
+  }
+}
+
+// Handle track KOL command
+async function handleTrackKOL(bot, msg) {
+  const chatId = msg.chat.id;
+  const text = msg.text || '';
+  const args = text.split(' ').slice(1).join(' ').trim();
+  
+  if (!args) {
+    await bot.sendMessage(chatId, '❌ Please specify a KOL name. Use /trackkol [name]\n\n💡 Use /kol to see all available KOLs.');
+    return;
+  }
+  
+  try {
+    const userPrefs = await getUserPreferences(chatId);
+    const searchName = args.toLowerCase();
+    
+    // Find KOL by name
+    let foundAddress = null;
+    let foundName = null;
+    
+    // Try exact match first
+    if (KOL_NAME_TO_ADDRESS[searchName]) {
+      foundAddress = KOL_NAME_TO_ADDRESS[searchName];
+      for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+        if (address === foundAddress) {
+          foundName = names[0];
+          break;
+        }
+      }
+    } else {
+      // Try partial match
+      const normalizedSearch = searchName.replace(/[^\w\s]/g, '').trim();
+      for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+        for (const name of names) {
+          const normalizedName = name.toLowerCase().replace(/[^\w\s]/g, '').trim();
+          if (normalizedName.includes(normalizedSearch) || normalizedSearch.includes(normalizedName)) {
+            foundAddress = address;
+            foundName = name;
+            break;
+          }
+        }
+        if (foundAddress) break;
+      }
+    }
+    
+    if (!foundAddress || !foundName) {
+      await bot.sendMessage(chatId, `❌ KOL "${args}" not found. Use /kol to see all available KOLs.`);
+      return;
+    }
+    
+    // Check if already tracking
+    const trackedKOLs = userPrefs.trackedKOLs || [];
+    if (trackedKOLs.includes(foundAddress)) {
+      await bot.sendMessage(chatId, `✅ You're already tracking <b>${foundName}</b>!`, {
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+    
+    // Add to tracked KOLs
+    trackedKOLs.push(foundAddress);
+    await updateUserPreferences(chatId, { trackedKOLs });
+    
+    await bot.sendMessage(chatId, `✅ Now tracking <b>${foundName}</b>!\n\nYou'll receive alerts when they buy or sell tokens.`, {
+      parse_mode: 'HTML'
+    });
+  } catch (error) {
+    console.error('Error tracking KOL:', error);
+    await bot.sendMessage(chatId, '❌ An error occurred while tracking the KOL.');
+  }
+}
+
+// Handle untrack KOL command
+async function handleUntrackKOL(bot, msg) {
+  const chatId = msg.chat.id;
+  const text = msg.text || '';
+  const args = text.split(' ').slice(1).join(' ').trim();
+  
+  try {
+    const userPrefs = await getUserPreferences(chatId);
+    const trackedKOLs = userPrefs.trackedKOLs || [];
+    
+    if (trackedKOLs.length === 0) {
+      await bot.sendMessage(chatId, '❌ You\'re not tracking any KOLs. Use /trackkol [name] to start tracking.');
+      return;
+    }
+    
+    if (!args) {
+      // List tracked KOLs
+      const kolList = trackedKOLs.map(address => {
+        const names = KOL_ADDRESSES[address];
+        return names ? names[0] : address.substring(0, 8) + '...';
+      }).join('\n');
+      
+      await bot.sendMessage(chatId, `📋 <b>Tracked KOLs:</b>\n\n${kolList}\n\n💡 Use /untrackkol [name] to stop tracking a KOL.`, {
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+    
+    // Find KOL to untrack
+    const searchName = args.toLowerCase();
+    let foundAddress = null;
+    let foundName = null;
+    
+    // Try exact match first
+    if (KOL_NAME_TO_ADDRESS[searchName]) {
+      foundAddress = KOL_NAME_TO_ADDRESS[searchName];
+      for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+        if (address === foundAddress) {
+          foundName = names[0];
+          break;
+        }
+      }
+    } else {
+      // Try partial match
+      const normalizedSearch = searchName.replace(/[^\w\s]/g, '').trim();
+      for (const [address, names] of Object.entries(KOL_ADDRESSES)) {
+        for (const name of names) {
+          const normalizedName = name.toLowerCase().replace(/[^\w\s]/g, '').trim();
+          if (normalizedName.includes(normalizedSearch) || normalizedSearch.includes(normalizedName)) {
+            foundAddress = address;
+            foundName = name;
+            break;
+          }
+        }
+        if (foundAddress) break;
+      }
+    }
+    
+    if (!foundAddress || !foundName) {
+      await bot.sendMessage(chatId, `❌ KOL "${args}" not found.`);
+      return;
+    }
+    
+    // Remove from tracked KOLs
+    const updatedKOLs = trackedKOLs.filter(addr => addr !== foundAddress);
+    await updateUserPreferences(chatId, { trackedKOLs: updatedKOLs });
+    
+    await bot.sendMessage(chatId, `✅ Stopped tracking <b>${foundName}</b>.`, {
+      parse_mode: 'HTML'
+    });
+  } catch (error) {
+    console.error('Error untracking KOL:', error);
+    await bot.sendMessage(chatId, '❌ An error occurred while untracking the KOL.');
+  }
+}
+
 module.exports = {
   handleStart,
   handleSelect,
@@ -516,6 +761,9 @@ module.exports = {
   handleBTC,
   handleETH,
   handleBNB,
-  handleSOL
+  handleSOL,
+  handleKOL,
+  handleTrackKOL,
+  handleUntrackKOL
 };
 

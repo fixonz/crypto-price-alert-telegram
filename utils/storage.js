@@ -50,6 +50,7 @@ async function loadUsers() {
           subscribed: Boolean(row.subscribed),
           tokens: JSON.parse(row.tokens || '[]'),
           customTokens: JSON.parse(row.custom_tokens || '[]'),
+          trackedKOLs: JSON.parse(row.tracked_kols || '[]'),
           interval: row.interval_minutes || 1,
           createdAt: row.created_at || Date.now()
         };
@@ -85,12 +86,13 @@ async function saveUsers(users) {
         
         for (const [chatId, user] of Object.entries(users)) {
           await client.query(`
-            INSERT INTO users (chat_id, subscribed, tokens, custom_tokens, interval_minutes, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO users (chat_id, subscribed, tokens, custom_tokens, tracked_kols, interval_minutes, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT(chat_id) DO UPDATE SET
               subscribed = EXCLUDED.subscribed,
               tokens = EXCLUDED.tokens,
               custom_tokens = EXCLUDED.custom_tokens,
+              tracked_kols = EXCLUDED.tracked_kols,
               interval_minutes = EXCLUDED.interval_minutes,
               updated_at = EXCLUDED.updated_at
           `, [
@@ -98,6 +100,7 @@ async function saveUsers(users) {
             user.subscribed || false,
             JSON.stringify(user.tokens || []),
             JSON.stringify(user.customTokens || []),
+            JSON.stringify(user.trackedKOLs || []),
             user.interval || 1,
             user.createdAt || Date.now(),
             Date.now()
@@ -245,6 +248,7 @@ async function getUserPreferences(chatId) {
       subscribed: true,
       tokens: [],
       customTokens: [], // Custom Solana tokens with addresses
+      trackedKOLs: [], // Tracked KOL addresses
       interval: 1, // default 1 minute
       createdAt: Date.now()
     };
@@ -254,6 +258,11 @@ async function getUserPreferences(chatId) {
   // Ensure customTokens exists for existing users
   if (!users[chatId].customTokens) {
     users[chatId].customTokens = [];
+    await saveUsers(users);
+  }
+  // Ensure trackedKOLs exists for existing users
+  if (!users[chatId].trackedKOLs) {
+    users[chatId].trackedKOLs = [];
     await saveUsers(users);
   }
   
@@ -302,6 +311,7 @@ async function updateUserPreferences(chatId, updates) {
       subscribed: true,
       tokens: [],
       customTokens: [],
+      trackedKOLs: [],
       interval: 1,
       createdAt: Date.now()
     };
@@ -309,6 +319,10 @@ async function updateUserPreferences(chatId, updates) {
   // Ensure customTokens exists
   if (!users[chatId].customTokens) {
     users[chatId].customTokens = [];
+  }
+  // Ensure trackedKOLs exists
+  if (!users[chatId].trackedKOLs) {
+    users[chatId].trackedKOLs = [];
   }
   Object.assign(users[chatId], updates);
   await saveUsers(users);

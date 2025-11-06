@@ -8,6 +8,7 @@ Create a `.env` file in the root directory with the following variables:
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 ADMIN_CHAT_ID=your_chat_id_here
 DATABASE_URL=your_neon_database_url_here
+HELIUS_API_KEY=your_helius_api_key_here
 ```
 
 ## Explanation
@@ -15,6 +16,7 @@ DATABASE_URL=your_neon_database_url_here
 - **TELEGRAM_BOT_TOKEN**: Your Telegram bot token from BotFather
 - **ADMIN_CHAT_ID**: Your Telegram chat ID to receive admin notifications
 - **DATABASE_URL**: Your Neon serverless Postgres connection string (required for alerts)
+- **HELIUS_API_KEY**: (Optional) Your Helius RPC API key for KOL transaction monitoring. If not set, a default key will be used.
 
 ## Database Setup (Neon)
 

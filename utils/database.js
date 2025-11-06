@@ -45,11 +45,21 @@ async function initDatabase() {
         subscribed BOOLEAN DEFAULT true,
         tokens TEXT DEFAULT '[]',
         custom_tokens TEXT DEFAULT '[]',
+        tracked_kols TEXT DEFAULT '[]',
         interval_minutes INTEGER DEFAULT 1,
         created_at BIGINT,
         updated_at BIGINT
       )
     `);
+    
+    // Add tracked_kols column if it doesn't exist (for existing databases)
+    try {
+      await pool.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS tracked_kols TEXT DEFAULT '[]'
+      `);
+    } catch (error) {
+      // Column might already exist, ignore error
+    }
     
     // Create price_history table
     await pool.query(`

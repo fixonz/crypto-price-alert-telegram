@@ -18,7 +18,10 @@ const {
   handleBTC,
   handleETH,
   handleBNB,
-  handleSOL
+  handleSOL,
+  handleKOL,
+  handleTrackKOL,
+  handleUntrackKOL
 } = require('./handlers/commands');
 
 const { handleCallbackQuery } = require('./handlers/callbacks');
@@ -55,6 +58,11 @@ bot.onText(/\/btc$/i, (msg) => handleBTC(bot, msg));
 bot.onText(/\/eth$/i, (msg) => handleETH(bot, msg));
 bot.onText(/\/bnb$/i, (msg) => handleBNB(bot, msg));
 bot.onText(/\/sol$/i, (msg) => handleSOL(bot, msg));
+
+// KOL commands
+bot.onText(/\/kol/i, (msg) => handleKOL(bot, msg));
+bot.onText(/\/trackkol/i, (msg) => handleTrackKOL(bot, msg));
+bot.onText(/\/untrackkol/i, (msg) => handleUntrackKOL(bot, msg));
 
 // Handle callback queries (inline keyboard buttons)
 bot.on('callback_query', (query) => handleCallbackQuery(bot, query));
@@ -220,6 +228,12 @@ cron.schedule('*/2 * * * *', async () => {
 const { checkBoostsForAllTokens } = require('./services/boostChecker');
 cron.schedule('*/30 * * * *', async () => {
   await checkBoostsForAllTokens(bot);
+});
+
+// Schedule KOL transaction monitoring (runs every 5 minutes)
+const { checkKOLTransactions } = require('./services/kolMonitor');
+cron.schedule('*/5 * * * *', async () => {
+  await checkKOLTransactions(bot);
 });
 
 // Initialize price history on startup
