@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { KOL_ADDRESSES } = require('../config/kol');
-const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken, saveKOLTransaction, calculateHoldTime, analyzeTokenPattern } = require('../utils/storage');
+const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken, saveKOLTransaction, calculateHoldTime, analyzeTokenPattern, saveTokenPerformance } = require('../utils/storage');
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
@@ -155,6 +155,17 @@ function parseSwapTransaction(tx, kolAddress) {
         amount = Math.abs(tokenChange.change);
         solAmount = solChange;
       }
+      // Edge case: Both SOL and tokens going out - might be a sell with fees or wrapped SOL
+      // If tokens are going out significantly, it's likely a sell (SOL might be wrapped differently)
+      else if (solChange < -0.001 && tokenChange.change < -0.000001 && Math.abs(tokenChange.change) > 1000) {
+        // Large token amount going out = likely a sell
+        // SOL going out might be fees or wrapped SOL conversion
+        swapType = 'sell';
+        tokenMint = tokenChange.mint;
+        amount = Math.abs(tokenChange.change);
+        solAmount = Math.abs(solChange); // Use absolute value for sell amount
+        console.log(`    ⚠️ Sell detected (both SOL and tokens out): tokens=${amount.toFixed(2)}, SOL=${solAmount.toFixed(4)}`);
+      }
       // Edge case: SOL comes in but token change is small (might be wrapped SOL or fees)
       // Check if description indicates a sell
       else if (solChange > 0.001 && isSwapDescription && description.toLowerCase().includes('sell')) {
@@ -172,9 +183,23 @@ function parseSwapTransaction(tx, kolAddress) {
         console.log(`    💰 Transaction analysis: SOL change=${solChange.toFixed(4)}, Token change=${tokenChange.change.toFixed(4)}, Type=${swapType || 'UNKNOWN'}, Desc="${description.substring(0, 40)}"`);
       }
     } 
+    // Alternative detection: Large token amount going out (even if SOL also going out)
+    // This handles cases where SOL fees are deducted separately
+    if (!swapType && significantTokenChanges.length > 0) {
+      const tokenChange = significantTokenChanges[0];
+      // If large amount of tokens going out, it's likely a sell (SOL might be wrapped or fees)
+      if (tokenChange.change < -1000 && Math.abs(solChange) > 0.001) {
+        swapType = 'sell';
+        tokenMint = tokenChange.mint;
+        amount = Math.abs(tokenChange.change);
+        solAmount = Math.abs(solChange); // Might be fees, but use it anyway
+        console.log(`    ⚠️ Sell detected (large token out): ${amount.toFixed(2)} tokens, SOL=${solAmount.toFixed(4)}`);
+      }
+    }
+    
     // Alternative detection: SOL comes in with swap description but no token transfers visible
     // This might happen if tokens are burned or transferred differently
-    else if (solChange > 0.001 && isSwapDescription && description.toLowerCase().includes('sell')) {
+    if (!swapType && solChange > 0.001 && isSwapDescription && description.toLowerCase().includes('sell')) {
       // Try to find ANY token transfer (even if filtered out)
       const allTokenTransfers = tx.tokenTransfers || [];
       for (const transfer of allTokenTransfers) {
@@ -196,9 +221,20 @@ function parseSwapTransaction(tx, kolAddress) {
         }
       }
     }
-    else if (Math.abs(solChange) > 0.001) {
+    
+    if (!swapType && Math.abs(solChange) > 0.001) {
       // Log when SOL changes but no token swap detected
       console.log(`    ⚠️ SOL change detected (${solChange.toFixed(4)}) but no significant token change found. Description: "${description.substring(0, 60)}"`);
+      // Log token transfers for debugging
+      if (tokenTransfers.length > 0) {
+        console.log(`    🔍 Token transfers: ${tokenTransfers.length} transfers found`);
+        tokenTransfers.slice(0, 3).forEach((transfer, idx) => {
+          const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
+          const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
+          const isKOLInvolved = from === kolAddressLower || to === kolAddressLower;
+          console.log(`      Transfer ${idx + 1}: ${isKOLInvolved ? 'KOL INVOLVED' : 'other'}, from=${from.substring(0, 8)}..., to=${to.substring(0, 8)}..., amount=${transfer.tokenAmount || transfer.amount || 0}`);
+        });
+      }
     }
     
     if (swapType && tokenMint) {
@@ -527,6 +563,13 @@ async function checkKOLTransactions(bot) {
               // Calculate market cap if we have price
               if (tokenPrice) {
                 marketCap = tokenPrice * 1e9; // Calculate market cap (price × 1B supply for Solana tokens)
+                
+                // Save performance snapshot for long-term analysis
+                try {
+                  await saveTokenPerformance(swapInfo.tokenMint, tokenPrice, marketCap, null);
+                } catch (error) {
+                  console.log(`  ⚠️ Could not save performance snapshot:`, error.message);
+                }
               }
             } catch (error) {
               console.log(`  ⚠️ Could not fetch token info for ${swapInfo.tokenMint}:`, error.message);

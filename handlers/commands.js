@@ -1,5 +1,5 @@
 const { TOKENS, VALID_INTERVALS } = require('../config/tokens');
-const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUserCount, getActiveUserCount, setTempFlag, getTempFlag, clearTempFlag } = require('../utils/storage');
+const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUserCount, getActiveUserCount, setTempFlag, getTempFlag, clearTempFlag, getWinningTokens } = require('../utils/storage');
 const { getSolanaTokenInfo, getTokenPrice } = require('../utils/api');
 const { scheduleUserUpdates } = require('../services/scheduler');
 const { notifyAdminNewUser } = require('./admin');

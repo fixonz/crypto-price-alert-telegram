@@ -855,6 +855,317 @@ async function analyzeTokenPattern(tokenMint) {
   return null;
 }
 
+// Save token performance snapshot (price, market cap, volume) for historical analysis
+async function saveTokenPerformance(tokenMint, price, marketCap, volume24h) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const timestamp = Math.floor(Date.now() / 1000);
+      
+      await pool.query(`
+        INSERT INTO token_performance (token_mint, timestamp, price, market_cap, volume_24h)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT(token_mint, timestamp) DO UPDATE SET
+          price = EXCLUDED.price,
+          market_cap = EXCLUDED.market_cap,
+          volume_24h = EXCLUDED.volume_24h
+      `, [tokenMint, timestamp, price || null, marketCap || null, volume24h || null]);
+      return;
+    } catch (error) {
+      console.error('Error saving token performance:', error.message);
+      throw error;
+    }
+  }
+}
+
+// Analyze token performance over time period (e.g., 24h, 7d)
+async function analyzeTokenPerformance(tokenMint, days = 7) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const now = Math.floor(Date.now() / 1000);
+      const startTime = now - (days * 24 * 60 * 60);
+      
+      // Get price history
+      const priceHistory = await pool.query(`
+        SELECT price, market_cap, timestamp
+        FROM token_performance
+        WHERE token_mint = $1 AND timestamp >= $2
+        ORDER BY timestamp ASC
+      `, [tokenMint, startTime]);
+      
+      // Get transaction history
+      const txHistory = await pool.query(`
+        SELECT transaction_type, sol_amount, token_price, timestamp
+        FROM kol_transactions
+        WHERE token_mint = $1 AND timestamp >= $2
+        ORDER BY timestamp ASC
+      `, [tokenMint, startTime]);
+      
+      if (priceHistory.rows.length === 0 && txHistory.rows.length === 0) {
+        return null;
+      }
+      
+      // Calculate price changes
+      let priceChange24h = null;
+      let priceChange7d = null;
+      let maxPrice = null;
+      let minPrice = null;
+      let peakMarketCap = null;
+      
+      if (priceHistory.rows.length > 0) {
+        const prices = priceHistory.rows.map(r => r.price).filter(p => p !== null);
+        const marketCaps = priceHistory.rows.map(r => r.market_cap).filter(m => m !== null);
+        
+        if (prices.length > 0) {
+          maxPrice = Math.max(...prices);
+          minPrice = Math.min(...prices);
+          
+          // Find price 24h and 7d ago
+          const price24hAgo = priceHistory.rows.find(r => r.timestamp <= now - 24*60*60)?.price;
+          const price7dAgo = priceHistory.rows.find(r => r.timestamp <= now - 7*24*60*60)?.price;
+          const currentPrice = prices[prices.length - 1];
+          
+          if (price24hAgo && currentPrice) {
+            priceChange24h = ((currentPrice - price24hAgo) / price24hAgo) * 100;
+          }
+          if (price7dAgo && currentPrice) {
+            priceChange7d = ((currentPrice - price7dAgo) / price7dAgo) * 100;
+          }
+        }
+        
+        if (marketCaps.length > 0) {
+          peakMarketCap = Math.max(...marketCaps);
+        }
+      }
+      
+      // Analyze transactions
+      const buys = txHistory.rows.filter(tx => tx.transaction_type === 'buy');
+      const sells = txHistory.rows.filter(tx => tx.transaction_type === 'sell');
+      
+      // Calculate average hold times
+      const kolTransactions = {};
+      for (const tx of txHistory.rows) {
+        // Group by KOL (we'd need kol_address, but for now use timestamp patterns)
+        // This is simplified - in real implementation, we'd track by KOL
+      }
+      
+      return {
+        tokenMint,
+        periodDays: days,
+        priceChange24h,
+        priceChange7d,
+        maxPrice,
+        minPrice,
+        peakMarketCap,
+        totalBuys: buys.length,
+        totalSells: sells.length,
+        buyVolume: buys.reduce((sum, tx) => sum + (tx.sol_amount || 0), 0),
+        sellVolume: sells.reduce((sum, tx) => sum + (tx.sol_amount || 0), 0),
+        priceHistory: priceHistory.rows
+      };
+    } catch (error) {
+      console.error('Error analyzing token performance:', error.message);
+      return null;
+    }
+  }
+  return null;
+}
+
+// Get winning tokens based on analysis (high score tokens)
+async function getWinningTokens(limit = 10, minDays = 1) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      // Get tokens analyzed in the last N days
+      const now = Math.floor(Date.now() / 1000);
+      const minAnalysisDate = now - (minDays * 24 * 60 * 60);
+      
+      const result = await pool.query(`
+        SELECT * FROM token_analysis
+        WHERE analysis_date >= $1 AND is_winner = true
+        ORDER BY winner_score DESC
+        LIMIT $2
+      `, [minAnalysisDate, limit]);
+      
+      return result.rows;
+    } catch (error) {
+      console.error('Error getting winning tokens:', error.message);
+      return [];
+    }
+  }
+  return [];
+}
+
+// Run comprehensive long-term analysis on all tokens
+async function runLongTermAnalysis(days = 7) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      console.log(`📊 Running long-term analysis for ${days} days...`);
+      
+      // Get all unique tokens that have transactions
+      const tokensResult = await pool.query(`
+        SELECT DISTINCT token_mint 
+        FROM kol_transactions
+        WHERE timestamp >= $1
+      `, [Math.floor(Date.now() / 1000) - (days * 24 * 60 * 60)]);
+      
+      const tokens = tokensResult.rows.map(r => r.token_mint);
+      console.log(`  Found ${tokens.length} tokens to analyze`);
+      
+      const analysisResults = [];
+      
+      for (const tokenMint of tokens) {
+        try {
+          // Get transaction pattern
+          const pattern = await analyzeTokenPattern(tokenMint);
+          
+          // Get performance data
+          const performance = await analyzeTokenPerformance(tokenMint, days);
+          
+          if (!pattern && !performance) continue;
+          
+          // Calculate winner score
+          let winnerScore = 0;
+          let isWinner = false;
+          
+          // Score factors:
+          // 1. Multiple KOLs (more = better)
+          if (pattern) {
+            winnerScore += pattern.kolCount * 10;
+            
+            // 2. High hold rate (KOLs still holding)
+            winnerScore += pattern.holdingKOLs * 15;
+            
+            // 3. Good buy/sell ratio (more buys than sells)
+            if (pattern.buySellRatio > 2) {
+              winnerScore += 20;
+            }
+            
+            // 4. Long average hold time
+            if (pattern.avgHoldTime && pattern.avgHoldTime > 60) {
+              winnerScore += Math.min(pattern.avgHoldTime / 10, 50); // Max 50 points
+            }
+          }
+          
+          // 5. Price appreciation
+          if (performance) {
+            if (performance.priceChange24h > 0) {
+              winnerScore += Math.min(performance.priceChange24h, 30); // Max 30 points
+            }
+            if (performance.priceChange7d > 0) {
+              winnerScore += Math.min(performance.priceChange7d / 2, 50); // Max 50 points
+            }
+            
+            // 6. High peak market cap
+            if (performance.peakMarketCap) {
+              if (performance.peakMarketCap > 1000000) { // > $1M
+                winnerScore += 20;
+              }
+              if (performance.peakMarketCap > 10000000) { // > $10M
+                winnerScore += 30;
+              }
+          }
+          }
+          
+          // Mark as winner if score > threshold
+          isWinner = winnerScore >= 50; // Minimum score to be a winner
+          
+          // Save analysis
+          const analysisDate = Math.floor(Date.now() / 1000);
+          const analysisData = JSON.stringify({
+            pattern,
+            performance,
+            winnerScore,
+            analyzedAt: new Date().toISOString()
+          });
+          
+          await pool.query(`
+            INSERT INTO token_analysis (
+              token_mint, analysis_date, kol_count, total_buys, total_sells,
+              avg_hold_time, holding_kols, price_change_24h, price_change_7d,
+              max_price, min_price, peak_market_cap, is_winner, winner_score, analysis_data
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT(token_mint) DO UPDATE SET
+              analysis_date = EXCLUDED.analysis_date,
+              kol_count = EXCLUDED.kol_count,
+              total_buys = EXCLUDED.total_buys,
+              total_sells = EXCLUDED.total_sells,
+              avg_hold_time = EXCLUDED.avg_hold_time,
+              holding_kols = EXCLUDED.holding_kols,
+              price_change_24h = EXCLUDED.price_change_24h,
+              price_change_7d = EXCLUDED.price_change_7d,
+              max_price = EXCLUDED.max_price,
+              min_price = EXCLUDED.min_price,
+              peak_market_cap = EXCLUDED.peak_market_cap,
+              is_winner = EXCLUDED.is_winner,
+              winner_score = EXCLUDED.winner_score,
+              analysis_data = EXCLUDED.analysis_data,
+              updated_at = EXTRACT(EPOCH FROM NOW()) * 1000
+          `, [
+            tokenMint,
+            analysisDate,
+            pattern?.kolCount || 0,
+            pattern?.totalBuys || 0,
+            pattern?.totalSells || 0,
+            pattern?.avgHoldTime || null,
+            pattern?.holdingKOLs || 0,
+            performance?.priceChange24h || null,
+            performance?.priceChange7d || null,
+            performance?.maxPrice || null,
+            performance?.minPrice || null,
+            performance?.peakMarketCap || null,
+            isWinner,
+            winnerScore,
+            analysisData
+          ]);
+          
+          if (isWinner) {
+            analysisResults.push({
+              tokenMint,
+              winnerScore,
+              kolCount: pattern?.kolCount || 0,
+              priceChange7d: performance?.priceChange7d || null
+            });
+          }
+          
+        } catch (error) {
+          console.error(`  Error analyzing token ${tokenMint.substring(0, 8)}...:`, error.message);
+        }
+      }
+      
+      console.log(`✅ Analysis complete. Found ${analysisResults.length} winning tokens`);
+      return {
+        totalAnalyzed: tokens.length,
+        winnersFound: analysisResults.length,
+        winners: analysisResults.sort((a, b) => b.winnerScore - a.winnerScore)
+      };
+    } catch (error) {
+      console.error('Error running long-term analysis:', error.message);
+      throw error;
+    }
+  }
+  return null;
+}
+
 module.exports = {
   loadUsers,
   saveUsers,
@@ -879,6 +1190,10 @@ module.exports = {
   saveKOLTransaction,
   getKOLTransactionHistory,
   calculateHoldTime,
-  analyzeTokenPattern
+  analyzeTokenPattern,
+  saveTokenPerformance,
+  analyzeTokenPerformance,
+  getWinningTokens,
+  runLongTermAnalysis
 };
 

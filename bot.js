@@ -14,6 +14,7 @@ const {
   handleCancel,
   handleStop,
   handleAdmin,
+  handleWinners,
   handleTokenAddress,
   handleBTC,
   handleETH,
@@ -228,6 +229,21 @@ cron.schedule('*/2 * * * *', async () => {
 const { checkBoostsForAllTokens } = require('./services/boostChecker');
 cron.schedule('*/30 * * * *', async () => {
   await checkBoostsForAllTokens(bot);
+});
+
+// Schedule long-term token analysis (runs daily at 2 AM UTC)
+const { runLongTermAnalysis, getWinningTokens } = require('./utils/storage');
+cron.schedule('0 2 * * *', async () => {
+  console.log('📊 Starting daily long-term token analysis...');
+  try {
+    const results = await runLongTermAnalysis(7); // Analyze last 7 days
+    if (results) {
+      console.log(`✅ Analysis complete: ${results.winnersFound} winning tokens found`);
+      // Optionally send summary to admin users
+    }
+  } catch (error) {
+    console.error('Error in daily analysis:', error.message);
+  }
 });
 
 // Schedule KOL transaction monitoring (runs every 30 seconds for fast KOLs)

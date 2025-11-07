@@ -132,6 +132,57 @@ async function initDatabase() {
       ON kol_transactions(token_mint, timestamp DESC)
     `);
     
+    // Create token_performance table to track token price history for analysis
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS token_performance (
+        token_mint TEXT,
+        timestamp BIGINT,
+        price REAL,
+        market_cap REAL,
+        volume_24h REAL,
+        created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000,
+        PRIMARY KEY (token_mint, timestamp)
+      )
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_token_performance_token_timestamp 
+      ON token_performance(token_mint, timestamp DESC)
+    `);
+    
+    // Create token_analysis table to store periodic analysis results
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS token_analysis (
+        token_mint TEXT PRIMARY KEY,
+        analysis_date BIGINT,
+        kol_count INTEGER DEFAULT 0,
+        total_buys INTEGER DEFAULT 0,
+        total_sells INTEGER DEFAULT 0,
+        avg_hold_time REAL,
+        holding_kols INTEGER DEFAULT 0,
+        price_change_24h REAL,
+        price_change_7d REAL,
+        max_price REAL,
+        min_price REAL,
+        peak_market_cap REAL,
+        is_winner BOOLEAN DEFAULT false,
+        winner_score REAL DEFAULT 0,
+        analysis_data TEXT, -- JSON string with detailed analysis
+        created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000,
+        updated_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000
+      )
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_token_analysis_winner_score 
+      ON token_analysis(winner_score DESC)
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_token_analysis_date 
+      ON token_analysis(analysis_date DESC)
+    `);
+    
     // Verify tables were created
     const tablesResult = await pool.query(`
       SELECT table_name 
