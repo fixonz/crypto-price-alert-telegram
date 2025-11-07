@@ -71,6 +71,15 @@ async function initDatabase() {
       )
     `);
     
+    // Create kol_signatures table to track last processed transaction signatures
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_signatures (
+        kol_address TEXT PRIMARY KEY,
+        last_signature TEXT,
+        updated_at BIGINT
+      )
+    `);
+    
     // Verify tables were created
     const tablesResult = await pool.query(`
       SELECT table_name 

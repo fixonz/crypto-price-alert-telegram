@@ -303,6 +303,72 @@ function clearTempFlag(chatId, flag) {
   }
 }
 
+// Load KOL last processed signatures
+async function loadKOLSignatures() {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query('SELECT * FROM kol_signatures');
+      const signatures = {};
+      for (const row of result.rows) {
+        signatures[row.kol_address] = row.last_signature;
+      }
+      return signatures;
+    } catch (error) {
+      console.error('Error loading KOL signatures from database:', error.message);
+      return {};
+    }
+  }
+  
+  // Fallback to JSON
+  const KOL_SIGNATURES_FILE = path.join(__dirname, '..', 'kol_signatures.json');
+  try {
+    const data = await fs.readFile(KOL_SIGNATURES_FILE, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    return {};
+  }
+}
+
+// Save KOL last processed signature
+async function saveKOLSignature(kolAddress, signature) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      await pool.query(`
+        INSERT INTO kol_signatures (kol_address, last_signature, updated_at)
+        VALUES ($1, $2, $3)
+        ON CONFLICT(kol_address) DO UPDATE SET
+          last_signature = EXCLUDED.last_signature,
+          updated_at = EXCLUDED.updated_at
+      `, [kolAddress, signature, Date.now()]);
+      return;
+    } catch (error) {
+      console.error('Error saving KOL signature to database:', error.message);
+      throw error;
+    }
+  }
+  
+  // Fallback to JSON
+  const KOL_SIGNATURES_FILE = path.join(__dirname, '..', 'kol_signatures.json');
+  try {
+    const signatures = await loadKOLSignatures();
+    signatures[kolAddress] = signature;
+    await fs.writeFile(KOL_SIGNATURES_FILE, JSON.stringify(signatures, null, 2), 'utf8');
+  } catch (error) {
+    console.error(`❌ Error saving KOL signatures to ${KOL_SIGNATURES_FILE}:`, error.message);
+    throw error;
+  }
+}
+
 // Update user preferences
 async function updateUserPreferences(chatId, updates) {
   const users = await loadUsers();
@@ -341,6 +407,8 @@ module.exports = {
   updateUserPreferences,
   setTempFlag,
   getTempFlag,
-  clearTempFlag
+  clearTempFlag,
+  loadKOLSignatures,
+  saveKOLSignature
 };
 

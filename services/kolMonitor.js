@@ -1,12 +1,9 @@
 const axios = require('axios');
 const { KOL_ADDRESSES } = require('../config/kol');
-const { loadUsers } = require('../utils/storage');
+const { loadUsers, loadKOLSignatures, saveKOLSignature } = require('../utils/storage');
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
-
-// Cache to track last checked transaction signature per KOL
-const lastTransactionCache = {};
 
 // Get recent transactions for a KOL address using Helius API
 async function getKOLTransactions(kolAddress, limit = 10) {
@@ -48,6 +45,7 @@ async function getKOLTransactions(kolAddress, limit = 10) {
 }
 
 // Parse transaction to extract token swap information
+// Handles Helius API format with tokenTransfers and nativeTransfers
 function parseSwapTransaction(tx, kolAddress) {
   try {
     if (!tx) {
@@ -57,127 +55,94 @@ function parseSwapTransaction(tx, kolAddress) {
     // Extract signature (already done in main loop, but keep for safety)
     const signature = tx.signature || tx.transaction?.signatures?.[0] || tx.txHash;
     
-    // Helius standard format
-    if (!tx.transaction || !tx.transaction.message) {
+    // Check if transaction failed (if error field exists)
+    if (tx.type === 'FAILED' || tx.error) {
       return null;
     }
 
-    const transaction = tx.transaction;
-    const meta = tx.meta;
-    
-    if (!meta || meta.err) {
-      return null; // Failed transaction
-    }
-    
-    const blockTime = tx.blockTime;
+    // Helius Enhanced Transactions API format uses tokenTransfers and nativeTransfers
+    const tokenTransfers = tx.tokenTransfers || [];
+    const nativeTransfers = tx.nativeTransfers || [];
+    const timestamp = tx.timestamp ? new Date(tx.timestamp * 1000) : new Date();
 
-    // Get the KOL's account index from the transaction
-    // The accountKeys can be strings or objects with pubkey property
-    const accountKeys = transaction.message?.accountKeys || [];
-    
-    // Find the KOL's address in the account keys
-    let kolAccountIndex = -1;
-    for (let i = 0; i < accountKeys.length; i++) {
-      const acc = accountKeys[i];
-      const accAddress = typeof acc === 'string' ? acc : (acc.pubkey || acc);
-      if (accAddress && accAddress.toLowerCase() === kolAddress.toLowerCase()) {
-        kolAccountIndex = i;
-        break;
+    // If no transfers at all, skip
+    if (tokenTransfers.length === 0 && nativeTransfers.length === 0) {
+      return null;
+    }
+
+    // Normalize KOL address for comparison
+    const kolAddressLower = kolAddress.toLowerCase();
+
+    // Process native transfers (SOL) - find transfers involving the KOL
+    let solChange = 0;
+    for (const transfer of nativeTransfers) {
+      const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
+      const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
+      const amount = parseFloat(transfer.amount || 0) / 1e9; // Convert lamports to SOL
+      
+      if (from === kolAddressLower) {
+        solChange -= amount; // SOL sent out
+      }
+      if (to === kolAddressLower) {
+        solChange += amount; // SOL received
       }
     }
-    
-    // If not found, default to first account (usually the signer/fee payer)
-    if (kolAccountIndex === -1) {
-      kolAccountIndex = 0;
+
+    // Process token transfers - find transfers involving the KOL
+    const tokenChanges = [];
+    for (const transfer of tokenTransfers) {
+      const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
+      const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
+      const mint = transfer.mint || transfer.tokenAddress;
+      const amount = parseFloat(transfer.tokenAmount || transfer.amount || 0);
+      
+      if (!mint) continue;
+
+      // Filter out SOL and stablecoins
+      const mintLower = mint.toLowerCase();
+      if (mintLower.includes('so11111111111111111111111111111111111111112') || // SOL
+          mintLower.includes('epjfwda5hvph1akvd2vndkrefmtwqxar3sqn7kl3ng') || // USDC
+          mintLower.includes('es9vfr6n3fmelq3q9hmkyfv8ycbkmahfsn3qycpc')) { // USDT
+        continue;
+      }
+
+      // Check if KOL is involved in this transfer
+      if (from === kolAddressLower || to === kolAddressLower) {
+        const change = from === kolAddressLower ? -amount : amount; // Negative if sending, positive if receiving
+        
+        // Find existing token change or create new one
+        let tokenChange = tokenChanges.find(tc => tc.mint.toLowerCase() === mintLower);
+        if (!tokenChange) {
+          tokenChange = { mint, change: 0 };
+          tokenChanges.push(tokenChange);
+        }
+        tokenChange.change += change;
+      }
     }
 
-    // Check for token transfers
-    const preTokenBalances = meta.preTokenBalances || [];
-    const postTokenBalances = meta.postTokenBalances || [];
-    
-    // Find token balance changes for the KOL's account
-    const tokenChanges = [];
-    const balanceMap = new Map();
-    
-    // Map pre-balances for KOL's account
-    preTokenBalances
-      .filter(balance => balance.accountIndex === kolAccountIndex)
-      .forEach(balance => {
-        const key = balance.mint;
-        balanceMap.set(key, {
-          mint: balance.mint,
-          preAmount: parseFloat(balance.uiTokenAmount?.uiAmountString || '0'),
-          owner: balance.owner
-        });
-      });
-    
-    // Map post-balances and calculate changes
-    postTokenBalances
-      .filter(balance => balance.accountIndex === kolAccountIndex)
-      .forEach(balance => {
-        const key = balance.mint;
-        const preBalance = balanceMap.get(key);
-        const postAmount = parseFloat(balance.uiTokenAmount?.uiAmountString || '0');
-        
-        if (preBalance) {
-          const change = postAmount - preBalance.preAmount;
-          if (Math.abs(change) > 0.000001) { // Significant change
-            tokenChanges.push({
-              mint: balance.mint,
-              owner: balance.owner,
-              change: change,
-              preAmount: preBalance.preAmount,
-              postAmount: postAmount
-            });
-          }
-        } else if (postAmount > 0.000001) {
-          // New token balance (buy)
-          tokenChanges.push({
-            mint: balance.mint,
-            owner: balance.owner,
-            change: postAmount,
-            preAmount: 0,
-            postAmount: postAmount
-          });
-        }
-      });
-    
-    // Check for SOL balance changes for KOL's account
-    const preBalances = meta.preBalances || [];
-    const postBalances = meta.postBalances || [];
-    let solChange = 0;
-    
-    if (preBalances[kolAccountIndex] !== undefined && postBalances[kolAccountIndex] !== undefined) {
-      solChange = (postBalances[kolAccountIndex] - preBalances[kolAccountIndex]) / 1e9; // Convert lamports to SOL
-    }
-    
     // Determine if this is a buy or sell
-    // Buy: SOL decreases, token increases
-    // Sell: SOL increases, token decreases
+    // Buy: SOL decreases (negative), token increases (positive)
+    // Sell: SOL increases (positive), token decreases (negative)
     let swapType = null;
     let tokenMint = null;
     let amount = 0;
     let solAmount = 0;
-    
-    // Filter out SOL and USDC (common stablecoins) from token changes
-    const significantTokenChanges = tokenChanges.filter(change => {
-      const mint = change.mint.toLowerCase();
-      // Exclude SOL, USDC, and other common stablecoins
-      return !mint.includes('so11111111111111111111111111111111111111112') && // SOL
-             !mint.includes('epjfwda5hvph1akvd2vndkrefmtwqxar3sqn7kl3ng') && // USDC
-             !mint.includes('es9vfr6n3fmelq3q9hmkyfv8ycbkmahfsn3qycpc'); // USDT
-    });
+
+    // Find significant token changes (non-stablecoin tokens)
+    const significantTokenChanges = tokenChanges.filter(change => Math.abs(change.change) > 0.000001);
     
     if (significantTokenChanges.length > 0 && Math.abs(solChange) > 0.001) {
       const tokenChange = significantTokenChanges[0];
       
-      // Check if SOL decreased (buy) or increased (sell)
+      // Buy: SOL goes out (negative), tokens come in (positive)
       if (solChange < -0.001 && tokenChange.change > 0.000001) {
         swapType = 'buy';
         tokenMint = tokenChange.mint;
         amount = tokenChange.change;
         solAmount = Math.abs(solChange);
-      } else if (solChange > 0.001 && tokenChange.change < -0.000001) {
+      } 
+      // Sell: SOL comes in (positive), tokens go out (negative)
+      else if (solChange > 0.001 && tokenChange.change < -0.000001) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
@@ -188,18 +153,19 @@ function parseSwapTransaction(tx, kolAddress) {
     if (swapType && tokenMint) {
       return {
         signature: signature || '',
-        timestamp: blockTime ? new Date(blockTime * 1000) : new Date(),
+        timestamp: timestamp,
         type: swapType, // 'buy' or 'sell'
         tokenMint: tokenMint,
         tokenAmount: amount,
         solAmount: solAmount,
-        owner: tokenChanges[0]?.owner || null
+        owner: null
       };
     }
     
     return null;
   } catch (error) {
     console.error('Error parsing transaction:', error.message);
+    console.error('Transaction keys:', tx ? Object.keys(tx).join(', ') : 'null');
     return null;
   }
 }
@@ -232,6 +198,9 @@ function getKOLName(address) {
 async function checkKOLTransactions(bot) {
   try {
     const users = await loadUsers();
+    
+    // Load last processed signatures from persistent storage
+    const lastSignatures = await loadKOLSignatures();
     
     // Get all tracked KOL addresses from all users
     const trackedKOLAddresses = new Set();
@@ -273,12 +242,14 @@ async function checkKOLTransactions(bot) {
             hasTxHash: !!firstTx.txHash,
             hasTransaction: !!firstTx.transaction,
             hasTransactionSignatures: !!(firstTx.transaction?.signatures?.[0]),
+            hasTokenTransfers: Array.isArray(firstTx.tokenTransfers),
+            hasNativeTransfers: Array.isArray(firstTx.nativeTransfers),
             keys: Object.keys(firstTx).slice(0, 10)
           });
         }
         
-        // Get last checked signature for this KOL
-        const lastSignature = lastTransactionCache[kolAddress];
+        // Get last checked signature for this KOL from persistent storage
+        const lastSignature = lastSignatures[kolAddress] || null;
         console.log(`  🔑 Last processed signature: ${lastSignature ? lastSignature.substring(0, 16) + '...' : 'None (first check - will process all)'}`);
         
         let newTransactionsFound = 0;
@@ -418,10 +389,10 @@ async function checkKOLTransactions(bot) {
           }
         }
         
-        // Update cache with newest signature after processing all new transactions
+        // Update persistent storage with newest signature after processing all new transactions
         if (newestSignature && (!lastSignature || newestSignature !== lastSignature)) {
-          lastTransactionCache[kolAddress] = newestSignature;
-          console.log(`  💾 Updated last signature cache for ${kolName}: ${newestSignature.substring(0, 16)}...`);
+          await saveKOLSignature(kolAddress, newestSignature);
+          console.log(`  💾 Updated last signature for ${kolName}: ${newestSignature.substring(0, 16)}...`);
         }
         
         if (newTransactionsFound > 0) {
