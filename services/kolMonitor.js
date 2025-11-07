@@ -306,7 +306,11 @@ async function parseSwapTransaction(tx, kolAddress) {
     // Check transaction description for swap indicators (Helius often includes this)
     const isSwapDescription = description.toLowerCase().includes('swap') || 
                               description.toLowerCase().includes('sell') ||
-                              description.toLowerCase().includes('buy');
+                              description.toLowerCase().includes('buy') ||
+                              description.toLowerCase().includes('axiom') || // Axiom trading platform
+                              description.toLowerCase().includes('pump.fun') ||
+                              description.toLowerCase().includes('raydium') ||
+                              description.toLowerCase().includes('jupiter');
 
     // If no transfers at all, skip
     if (tokenTransfers.length === 0 && nativeTransfers.length === 0) {
@@ -516,6 +520,44 @@ async function parseSwapTransaction(tx, kolAddress) {
     if (!swapType && Math.abs(solChange) > 0.001) {
       // Log when SOL changes but no token swap detected
       console.log(`    ⚠️ SOL change detected (${solChange.toFixed(4)}) but no significant token change found. Description: "${description.substring(0, 60)}"`);
+      
+      // Enhanced detection: Check if description suggests a swap even without visible token transfers
+      // This handles cases where tokens might be burned, wrapped differently, or transfers aren't visible
+      if (solChange > 0.001 && isSwapDescription) {
+        // SOL received + swap description = likely a sell
+        // Try to find ANY token transfer from KOL (even if small or filtered)
+        const allTokenTransfers = tx.tokenTransfers || [];
+        let foundTokenTransfer = false;
+        
+        for (const transfer of allTokenTransfers) {
+          const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
+          const mint = transfer.mint || transfer.tokenAddress;
+          const amount = parseFloat(transfer.tokenAmount || transfer.amount || 0);
+          
+          if (from === kolAddressLower && mint && amount > 0) {
+            const mintLower = mint.toLowerCase();
+            // Skip SOL and stablecoins
+            if (!mintLower.includes('so11111111111111111111111111111111111111112') &&
+                !mintLower.includes('epjfwda5hvph1akvd2vndkrefmtwqxar3sqn7kl3ng') &&
+                !mintLower.includes('es9vfr6n3fmelq3q9hmkyfv8ycbkmahfsn3qycpc')) {
+              swapType = 'sell';
+              tokenMint = mint;
+              // Use amount even if small (might be partial sell or wrapped differently)
+              amount = amount;
+              solAmount = totalSignificantSolReceived > 0.1 ? totalSignificantSolReceived : (largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : solChange));
+              foundTokenTransfer = true;
+              console.log(`    ✅ Sell detected via description + token transfer: token=${mint.substring(0, 8)}..., amount=${amount.toFixed(2)}, SOL=${solAmount.toFixed(4)}`);
+              break;
+            }
+          }
+        }
+        
+        // If no token transfer found but description strongly suggests swap, log for investigation
+        if (!foundTokenTransfer) {
+          console.log(`    🔍 SOL received (${solChange.toFixed(4)}) with swap-like description but no token transfers found. This might be a fee payment or wrapped SOL transfer.`);
+        }
+      }
+      
       // Log token transfers for debugging
       if (tokenTransfers.length > 0) {
         console.log(`    🔍 Token transfers: ${tokenTransfers.length} transfers found`);
@@ -523,8 +565,10 @@ async function parseSwapTransaction(tx, kolAddress) {
           const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
           const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
           const isKOLInvolved = from === kolAddressLower || to === kolAddressLower;
-          console.log(`      Transfer ${idx + 1}: ${isKOLInvolved ? 'KOL INVOLVED' : 'other'}, from=${from.substring(0, 8)}..., to=${to.substring(0, 8)}..., amount=${transfer.tokenAmount || transfer.amount || 0}`);
+          console.log(`      Transfer ${idx + 1}: ${isKOLInvolved ? 'KOL INVOLVED' : 'other'}, from=${from.substring(0, 8)}..., to=${to.substring(0, 8)}..., amount=${transfer.tokenAmount || transfer.amount || 0}, mint=${(transfer.mint || transfer.tokenAddress || 'N/A').substring(0, 8)}...`);
         });
+      } else {
+        console.log(`    🔍 No token transfers found in transaction`);
       }
     }
     

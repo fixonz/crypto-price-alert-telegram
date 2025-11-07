@@ -1368,7 +1368,8 @@ async function updateKOLBehaviorPattern(kolAddress) {
         minHoldTime,
         buys.length,
         sells.length,
-        transactions.rows.length
+        transactions.rows.length,
+        Date.now() // last_updated - missing parameter!
       ]);
       
       return {
