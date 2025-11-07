@@ -230,11 +230,15 @@ cron.schedule('*/30 * * * *', async () => {
   await checkBoostsForAllTokens(bot);
 });
 
-// Schedule KOL transaction monitoring (runs every 5 minutes)
+// Schedule KOL transaction monitoring (runs every 30 seconds for fast KOLs)
+// Using setInterval instead of cron for seconds-level precision
 const { checkKOLTransactions } = require('./services/kolMonitor');
-cron.schedule('*/5 * * * *', async () => {
+setInterval(async () => {
   await checkKOLTransactions(bot);
-});
+}, 30 * 1000); // 30 seconds
+
+// Also run immediately on startup
+checkKOLTransactions(bot).catch(err => console.error('Error in initial KOL check:', err));
 
 // Initialize price history on startup
 initializePriceHistory();

@@ -405,6 +405,84 @@ async function getKOLTokenBalance(kolAddress, tokenMint) {
   }
 }
 
+// Get count of KOLs who have bought a specific token (for multi-KOL detection)
+async function getKOLCountForToken(tokenMint) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query(
+        'SELECT COUNT(DISTINCT kol_address) as kol_count FROM kol_token_balances WHERE token_mint = $1 AND first_buy_signature IS NOT NULL',
+        [tokenMint]
+      );
+      
+      return parseInt(result.rows[0]?.kol_count || 0);
+    } catch (error) {
+      console.error('Error counting KOLs for token:', error.message);
+      return 0;
+    }
+  }
+  
+  // Fallback to JSON
+  const KOL_BALANCES_FILE = path.join(__dirname, '..', 'kol_token_balances.json');
+  try {
+    const data = await fs.readFile(KOL_BALANCES_FILE, 'utf8');
+    const balances = JSON.parse(data);
+    const kolSet = new Set();
+    for (const key in balances) {
+      if (key.endsWith(`_${tokenMint}`) && balances[key].first_buy_signature) {
+        const kolAddress = key.split('_')[0];
+        kolSet.add(kolAddress);
+      }
+    }
+    return kolSet.size;
+  } catch (error) {
+    return 0;
+  }
+}
+
+// Get list of KOL names who have bought a token
+async function getKOLsForToken(tokenMint) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query(
+        'SELECT DISTINCT kol_address FROM kol_token_balances WHERE token_mint = $1 AND first_buy_signature IS NOT NULL',
+        [tokenMint]
+      );
+      
+      return result.rows.map(row => row.kol_address);
+    } catch (error) {
+      console.error('Error getting KOLs for token:', error.message);
+      return [];
+    }
+  }
+  
+  // Fallback to JSON
+  const KOL_BALANCES_FILE = path.join(__dirname, '..', 'kol_token_balances.json');
+  try {
+    const data = await fs.readFile(KOL_BALANCES_FILE, 'utf8');
+    const balances = JSON.parse(data);
+    const kolSet = new Set();
+    for (const key in balances) {
+      if (key.endsWith(`_${tokenMint}`) && balances[key].first_buy_signature) {
+        const kolAddress = key.split('_')[0];
+        kolSet.add(kolAddress);
+      }
+    }
+    return Array.from(kolSet);
+  } catch (error) {
+    return [];
+  }
+}
+
 // Check if we've already alerted on this transaction
 async function hasAlertedOnTransaction(signature) {
   await ensureDatabaseInitialized();
@@ -633,6 +711,8 @@ module.exports = {
   getKOLTokenBalance,
   updateKOLTokenBalance,
   hasAlertedOnTransaction,
-  markTransactionAsAlerted
+  markTransactionAsAlerted,
+  getKOLCountForToken,
+  getKOLsForToken
 };
 

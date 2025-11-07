@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { KOL_ADDRESSES } = require('../config/kol');
-const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted } = require('../utils/storage');
+const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken } = require('../utils/storage');
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
@@ -148,6 +148,14 @@ function parseSwapTransaction(tx, kolAddress) {
         amount = Math.abs(tokenChange.change);
         solAmount = solChange;
       }
+      
+      // Enhanced logging for debugging sell detection
+      if (Math.abs(solChange) > 0.001 && significantTokenChanges.length > 0) {
+        console.log(`    💰 Transaction analysis: SOL change=${solChange.toFixed(4)}, Token change=${tokenChange.change.toFixed(4)}, Type=${swapType || 'UNKNOWN'}`);
+      }
+    } else if (Math.abs(solChange) > 0.001) {
+      // Log when SOL changes but no token swap detected
+      console.log(`    ⚠️ SOL change detected (${solChange.toFixed(4)}) but no significant token change found`);
     }
     
     if (swapType && tokenMint) {
@@ -224,8 +232,8 @@ async function checkKOLTransactions(bot) {
       try {
         const kolName = getKOLName(kolAddress) || kolAddress.substring(0, 8) + '...';
         
-        // Get recent transactions (increase limit to catch more)
-        const transactions = await getKOLTransactions(kolAddress, 10);
+        // Get recent transactions (increase limit to catch rapid trades)
+        const transactions = await getKOLTransactions(kolAddress, 50);
         
         if (!transactions || transactions.length === 0) {
           console.log(`  ⚠️ No transactions found for ${kolName}`);
@@ -381,10 +389,26 @@ async function checkKOLTransactions(bot) {
               swapInfo.solAmount
             );
             
+            // Check if multiple KOLs have bought this token (for first buys only)
+            let kolCount = 0;
+            let otherKOLs = [];
+            if (swapInfo.type === 'buy' && isFirstBuy) {
+              // Get count AFTER updating (includes this KOL now)
+              kolCount = await getKOLCountForToken(swapInfo.tokenMint);
+              if (kolCount > 1) {
+                // Get list of all KOLs who bought this token
+                const allKOLs = await getKOLsForToken(swapInfo.tokenMint);
+                otherKOLs = allKOLs.filter(addr => addr !== kolAddress).map(addr => getKOLName(addr) || addr.substring(0, 8) + '...');
+              }
+            }
+            
             // Check if this is a complete exit (had tokens before, selling, and balance goes to ~0)
             const isCompleteExit = swapInfo.type === 'sell' && 
                                    balanceBeforeTx > 0.000001 && 
                                    newBalance <= 0.000001; // Consider 0 or very small balance as complete exit
+            
+            // Enhanced logging for balance tracking
+            console.log(`    📊 Balance: ${balanceBeforeTx.toFixed(6)} → ${newBalance.toFixed(6)} | First buy: ${isFirstBuy} | Complete exit: ${isCompleteExit}`);
             
             // Only alert on first-time buys or complete exits
             if (swapInfo.type === 'buy' && !isFirstBuy) {
@@ -464,7 +488,14 @@ async function checkKOLTransactions(bot) {
             // Determine alert type and message prefix
             let alertPrefix = '';
             if (isFirstBuy && swapInfo.type === 'buy') {
-              alertPrefix = '🆕 FIRST BUY - ';
+              if (kolCount >= 2) {
+                // Multiple KOLs detected - this is more significant
+                alertPrefix = `🔥 ${kolCount} KOLs - `;
+              } else {
+                // First KOL to buy - only alert if user is tracking this specific KOL
+                // (We'll filter this in the user loop)
+                alertPrefix = '🆕 FIRST BUY - ';
+              }
             } else if (isCompleteExit) {
               alertPrefix = '🚪 COMPLETE EXIT - ';
             }
@@ -480,6 +511,14 @@ async function checkKOLTransactions(bot) {
               hour12: false
             });
             
+            // For multi-KOL buys, cache the list of KOLs who bought this token (only fetch once, not per user)
+            let allKOLsForToken = [];
+            const isMultiKOLBuy = kolCount >= 2 && swapInfo.type === 'buy' && isFirstBuy;
+            if (isMultiKOLBuy) {
+              allKOLsForToken = await getKOLsForToken(swapInfo.tokenMint);
+              console.log(`  🔥 Multi-KOL buy detected: ${kolCount} KOLs bought ${tokenSymbol}`);
+            }
+            
             // Check all users to see if they're tracking this KOL or this token
             let alertSent = false;
             for (const [chatId, userPrefs] of Object.entries(users)) {
@@ -489,10 +528,20 @@ async function checkKOLTransactions(bot) {
               const isTrackingKOL = trackedKOLs.includes(kolAddress);
               const isTrackingToken = isTrackedToken(swapInfo.tokenMint, userPrefs);
               
-              console.log(`  👤 User ${chatId}: tracking KOL=${isTrackingKOL}, tracking token=${isTrackingToken}`);
+              // For multi-KOL buys, check if user tracks any of the KOLs who bought this token
+              let tracksAnyKOLInToken = false;
+              if (isMultiKOLBuy) {
+                tracksAnyKOLInToken = allKOLsForToken.some(addr => trackedKOLs.includes(addr));
+              }
               
-              // Send alert if user is tracking this KOL OR this token
-              if (isTrackingKOL || isTrackingToken) {
+              console.log(`  👤 User ${chatId}: tracking KOL=${isTrackingKOL}, tracking token=${isTrackingToken}, multi-KOL=${isMultiKOLBuy ? kolCount : 0}`);
+              
+              // Send alert if:
+              // 1. User is tracking this specific KOL OR token, OR
+              // 2. Multiple KOLs (2+) bought it AND user tracks at least one of those KOLs
+              const shouldAlert = isTrackingKOL || isTrackingToken || (isMultiKOLBuy && tracksAnyKOLInToken);
+              
+              if (shouldAlert) {
                 const buyEmoji = '🟢';
                 const sellEmoji = '🔴';
                 const actionEmoji = swapInfo.type === 'buy' ? buyEmoji : sellEmoji;
@@ -505,6 +554,16 @@ async function checkKOLTransactions(bot) {
                   message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b> @ ${formatMarketCap(marketCap)}\n`;
                 } else {
                   message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b>\n`;
+                }
+                
+                // Show other KOLs if multiple KOLs bought this token
+                if (kolCount >= 2 && swapInfo.type === 'buy' && otherKOLs.length > 0) {
+                  message += `\n🔥 <b>${kolCount} KOLs</b> in this token:\n`;
+                  message += `• ${kolName}\n`;
+                  otherKOLs.forEach(otherKol => {
+                    message += `• ${otherKol}\n`;
+                  });
+                  message += `\n`;
                 }
                 
                 // Amount tokens
