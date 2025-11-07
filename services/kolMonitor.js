@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { KOL_ADDRESSES } = require('../config/kol');
-const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken, saveKOLTransaction, calculateHoldTime, analyzeTokenPattern, saveTokenPerformance } = require('../utils/storage');
+const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken, saveKOLTransaction, getKOLTransactionHistory, calculateHoldTime, calculateRealizedPnL, analyzeTokenPattern, saveTokenPerformance, updateKOLBehaviorPattern, detectKOLDeviation } = require('../utils/storage');
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
@@ -81,6 +81,9 @@ function parseSwapTransaction(tx, kolAddress) {
 
     // Process native transfers (SOL) - find transfers involving the KOL
     let solChange = 0;
+    let solReceived = 0; // Track total SOL received (for sell PnL calculation)
+    let solSent = 0; // Track total SOL sent (for debugging)
+    let largestSolReceived = 0; // Track largest single SOL transfer received (likely the swap amount)
     for (const transfer of nativeTransfers) {
       const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
       const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
@@ -88,9 +91,15 @@ function parseSwapTransaction(tx, kolAddress) {
       
       if (from === kolAddressLower) {
         solChange -= amount; // SOL sent out
+        solSent += amount;
       }
       if (to === kolAddressLower) {
         solChange += amount; // SOL received
+        solReceived += amount;
+        // Track largest SOL transfer received (swap amount is usually much larger than fees)
+        if (amount > largestSolReceived) {
+          largestSolReceived = amount;
+        }
       }
     }
 
@@ -153,18 +162,30 @@ function parseSwapTransaction(tx, kolAddress) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
-        solAmount = solChange;
+        // For sells, prefer largest SOL received (swap amount) over total received
+        // Fees are typically small (< 0.1 SOL), so largest transfer is likely the swap
+        // Fallback to total received if largest is suspiciously small
+        if (largestSolReceived > 0.1) {
+          solAmount = largestSolReceived;
+        } else if (solReceived > 0) {
+          solAmount = solReceived;
+        } else {
+          solAmount = solChange;
+        }
+        console.log(`    💰 Sell SOL detection: largest=${largestSolReceived.toFixed(4)}, total=${solReceived.toFixed(4)}, net=${solChange.toFixed(4)}, using=${solAmount.toFixed(4)}`);
       }
       // Edge case: Both SOL and tokens going out - might be a sell with fees or wrapped SOL
       // If tokens are going out significantly, it's likely a sell (SOL might be wrapped differently)
       else if (solChange < -0.001 && tokenChange.change < -0.000001 && Math.abs(tokenChange.change) > 1000) {
         // Large token amount going out = likely a sell
         // SOL going out might be fees or wrapped SOL conversion
+        // Check if there's SOL received (might be wrapped differently or in a different transfer)
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
-        solAmount = Math.abs(solChange); // Use absolute value for sell amount
-        console.log(`    ⚠️ Sell detected (both SOL and tokens out): tokens=${amount.toFixed(2)}, SOL=${solAmount.toFixed(4)}`);
+        // For this edge case, if we have SOL received, use it; otherwise estimate from token amount
+        solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : Math.abs(solChange));
+        console.log(`    ⚠️ Sell detected (both SOL and tokens out): tokens=${amount.toFixed(2)}, SOL largest=${largestSolReceived.toFixed(4)}, SOL received=${solReceived.toFixed(4)}, SOL net=${solChange.toFixed(4)}`);
       }
       // Edge case: SOL comes in but token change is small (might be wrapped SOL or fees)
       // Check if description indicates a sell
@@ -174,7 +195,7 @@ function parseSwapTransaction(tx, kolAddress) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
-        solAmount = solChange;
+        solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : solChange);
         console.log(`    ⚠️ Sell detected via description: ${description.substring(0, 50)}`);
       }
       
@@ -192,8 +213,9 @@ function parseSwapTransaction(tx, kolAddress) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
-        solAmount = Math.abs(solChange); // Might be fees, but use it anyway
-        console.log(`    ⚠️ Sell detected (large token out): ${amount.toFixed(2)} tokens, SOL=${solAmount.toFixed(4)}`);
+        // Prefer SOL received over net change for accurate PnL
+        solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : Math.abs(solChange));
+        console.log(`    ⚠️ Sell detected (large token out): ${amount.toFixed(2)} tokens, SOL largest=${largestSolReceived.toFixed(4)}, SOL received=${solReceived.toFixed(4)}, SOL net=${solChange.toFixed(4)}`);
       }
     }
     
@@ -214,7 +236,7 @@ function parseSwapTransaction(tx, kolAddress) {
             swapType = 'sell';
             tokenMint = mint;
             amount = parseFloat(transfer.tokenAmount || transfer.amount || 0);
-            solAmount = solChange;
+            solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : solChange);
             console.log(`    ⚠️ Sell detected via description fallback: token=${mint.substring(0, 8)}...`);
             break;
           }
@@ -245,6 +267,7 @@ function parseSwapTransaction(tx, kolAddress) {
         tokenMint: tokenMint,
         tokenAmount: amount,
         solAmount: solAmount,
+        solReceived: solReceived, // Store SOL received for PnL calculation
         owner: null
       };
     }
@@ -279,6 +302,63 @@ function getKOLName(address) {
     }
   }
   return null;
+}
+
+// Group consecutive transactions of the same type within a timeframe
+// Groups transactions that are the same type (buy/sell), same token, and within GROUP_TIME_WINDOW_MS
+function groupTransactions(parsedTransactions, groupTimeWindowMs = 120000) { // Default: 2 minutes
+  if (parsedTransactions.length === 0) return [];
+  
+  const groups = [];
+  let currentGroup = null;
+  
+  for (const tx of parsedTransactions) {
+    if (!tx.swapInfo) continue; // Skip non-swap transactions
+    
+    const txTime = tx.swapInfo.timestamp ? tx.swapInfo.timestamp.getTime() : Date.now();
+    const groupKey = `${tx.swapInfo.type}_${tx.swapInfo.tokenMint}`;
+    
+    // Start a new group if:
+    // 1. No current group exists
+    // 2. Different type or token
+    // 3. Time gap is too large
+    if (!currentGroup || 
+        currentGroup.key !== groupKey ||
+        (txTime - currentGroup.lastTime) > groupTimeWindowMs) {
+      
+      // Save previous group if it exists
+      if (currentGroup) {
+        groups.push(currentGroup);
+      }
+      
+      // Start new group
+      currentGroup = {
+        key: groupKey,
+        type: tx.swapInfo.type,
+        tokenMint: tx.swapInfo.tokenMint,
+        transactions: [tx],
+        firstTime: txTime,
+        lastTime: txTime,
+        totalTokenAmount: tx.swapInfo.tokenAmount,
+        totalSolAmount: tx.swapInfo.solAmount,
+        signatures: [tx.swapInfo.signature]
+      };
+    } else {
+      // Add to current group
+      currentGroup.transactions.push(tx);
+      currentGroup.lastTime = Math.max(currentGroup.lastTime, txTime);
+      currentGroup.totalTokenAmount += tx.swapInfo.tokenAmount;
+      currentGroup.totalSolAmount += tx.swapInfo.solAmount;
+      currentGroup.signatures.push(tx.swapInfo.signature);
+    }
+  }
+  
+  // Don't forget the last group
+  if (currentGroup) {
+    groups.push(currentGroup);
+  }
+  
+  return groups;
 }
 
 // Monitor KOL transactions and send alerts
@@ -376,7 +456,8 @@ async function checkKOLTransactions(bot) {
         // Reverse to process oldest-first for correct balance tracking
         const transactionsInOrder = newTransactions.reverse();
         
-        // Process transactions (oldest first for correct balance tracking)
+        // Step 1: Parse all transactions first
+        const parsedTransactions = [];
         for (const tx of transactionsInOrder) {
           // Try multiple possible signature locations (Helius format variations)
           let signature = null;
@@ -400,80 +481,75 @@ async function checkKOLTransactions(bot) {
           
           if (!signature) {
             console.log(`  ⚠️ Transaction missing signature. Keys:`, Object.keys(tx).join(', '));
-            if (tx.transaction) {
-              console.log(`    Transaction keys:`, Object.keys(tx.transaction).join(', '));
-            }
             continue;
           }
           
           newTransactionsFound++;
-          console.log(`  🔍 Processing new transaction: ${signature.substring(0, 16)}...`);
+          console.log(`  🔍 Parsing transaction: ${signature.substring(0, 16)}...`);
           
           // Parse transaction
-          let swapInfo = parseSwapTransaction(tx, kolAddress);
-          
-          // If no swap detected but SOL came in, check if KOL had any tokens (balance-based sell detection)
-          if (!swapInfo) {
-            // Check native transfers for SOL coming in
-            const nativeTransfers = tx.nativeTransfers || [];
-            let solReceived = 0;
-            const kolAddressLower = kolAddress.toLowerCase();
-            
-            for (const transfer of nativeTransfers) {
-              const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
-              if (to === kolAddressLower) {
-                solReceived += parseFloat(transfer.amount || 0) / 1e9;
-              }
-            }
-            
-            // If SOL came in (> 0.1 SOL to filter out fees), log for debugging
-            if (solReceived > 0.1) {
-              console.log(`  🔍 SOL received ${solReceived.toFixed(4)} but no swap detected. Description: "${(tx.description || '').substring(0, 60)}"`);
-              console.log(`    Token transfers: ${(tx.tokenTransfers || []).length}, Native transfers: ${nativeTransfers.length}`);
-            }
-            
-            console.log(`  ⚠️ Transaction ${signature.substring(0, 16)}... is not a swap (no token changes detected)`);
-          } else {
-            console.log(`  ✅ Swap detected: ${swapInfo.type} ${swapInfo.tokenMint.substring(0, 8)}... (${swapInfo.tokenAmount} tokens, ${swapInfo.solAmount} SOL)`);
-          }
+          const swapInfo = parseSwapTransaction(tx, kolAddress);
           
           if (swapInfo && swapInfo.tokenMint) {
-            // Get token price first (needed for PnL calculation and buy price tracking)
-            let tokenPrice = null;
-            try {
-              const { getSolanaTokenPrice } = require('../utils/api');
-              const priceData = await getSolanaTokenPrice(swapInfo.tokenMint);
-              if (priceData && priceData.price) {
-                tokenPrice = parseFloat(priceData.price);
-              }
-            } catch (error) {
-              console.log(`  ⚠️ Could not fetch price for token ${swapInfo.tokenMint}:`, error.message);
-            }
+            parsedTransactions.push({ tx, signature, swapInfo });
+            console.log(`  ✅ Swap detected: ${swapInfo.type} ${swapInfo.tokenMint.substring(0, 8)}... (${swapInfo.tokenAmount} tokens, ${swapInfo.solAmount} SOL)`);
+          } else {
+            console.log(`  ⚠️ Transaction ${signature.substring(0, 16)}... is not a swap (no token changes detected)`);
+          }
+        }
+        
+        // Step 2: Group transactions by type, token, and timeframe
+        const transactionGroups = groupTransactions(parsedTransactions, 120000); // 2 minutes grouping window
+        console.log(`  📦 Grouped ${parsedTransactions.length} transactions into ${transactionGroups.length} groups`);
+        
+        // Step 3: Process each group
+        for (const group of transactionGroups) {
+          const isGrouped = group.transactions.length > 1;
+          console.log(`  📦 Processing group: ${group.type} ${group.transactions.length} tx(s) for token ${group.tokenMint.substring(0, 8)}...`);
+          
+          // Process all transactions in the group sequentially (for balance tracking)
+          // But collect data for a single aggregated alert
+          let balanceBeforeGroup = null;
+          let newBalanceAfterGroup = null;
+          let costBasis = 0;
+          let tokensBought = 0;
+          let isFirstBuy = false;
+          let tokenPrice = null;
+          let tokenInfo = null;
+          let marketCap = null;
+          let allAlreadyAlerted = true;
+          
+          // Process each transaction in the group to update balances
+          for (const parsedTx of group.transactions) {
+            const swapInfo = parsedTx.swapInfo;
             
-            // Check if we've already alerted on this transaction
+            // Check if we've already alerted on any transaction in this group
             const alreadyAlerted = await hasAlertedOnTransaction(swapInfo.signature);
-            if (alreadyAlerted) {
-              console.log(`  ⚠️ Skipping alert: Already alerted on transaction ${swapInfo.signature.substring(0, 16)}...`);
-              // Still update balance but don't alert
-              const balanceChange = swapInfo.type === 'buy' ? swapInfo.tokenAmount : -swapInfo.tokenAmount;
-              await updateKOLTokenBalance(
-                kolAddress, 
-                swapInfo.tokenMint, 
-                balanceChange, 
-                swapInfo.signature,
-                false, // Don't mark as first buy if we've already alerted
-                tokenPrice,
-                swapInfo.solAmount
-              );
-              continue;
+            if (!alreadyAlerted) {
+              allAlreadyAlerted = false;
             }
             
-            // Get current balance BEFORE this transaction
-            const currentBalanceRecord = await getKOLTokenBalance(kolAddress, swapInfo.tokenMint);
-            const balanceBeforeTx = currentBalanceRecord ? parseFloat(currentBalanceRecord.balance) : 0;
-            const costBasis = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_cost_basis || 0) : 0;
-            const tokensBought = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_tokens_bought || 0) : 0;
-            const isFirstBuy = !currentBalanceRecord || !currentBalanceRecord.first_buy_signature;
+            // Get balance before first transaction in group
+            if (balanceBeforeGroup === null) {
+              const currentBalanceRecord = await getKOLTokenBalance(kolAddress, swapInfo.tokenMint);
+              balanceBeforeGroup = currentBalanceRecord ? parseFloat(currentBalanceRecord.balance) : 0;
+              costBasis = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_cost_basis || 0) : 0;
+              tokensBought = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_tokens_bought || 0) : 0;
+              isFirstBuy = !currentBalanceRecord || !currentBalanceRecord.first_buy_signature;
+            }
+            
+            // Get token price (fetch once per group)
+            if (!tokenPrice) {
+              try {
+                const { getSolanaTokenPrice } = require('../utils/api');
+                const priceData = await getSolanaTokenPrice(swapInfo.tokenMint);
+                if (priceData && priceData.price) {
+                  tokenPrice = parseFloat(priceData.price);
+                }
+              } catch (error) {
+                console.log(`  ⚠️ Could not fetch price for token ${swapInfo.tokenMint}:`, error.message);
+              }
+            }
             
             // Save transaction to database for pattern analysis
             const txTimestampUnix = swapInfo.timestamp ? Math.floor(swapInfo.timestamp.getTime() / 1000) : Math.floor(Date.now() / 1000);
@@ -492,73 +568,46 @@ async function checkKOLTransactions(bot) {
               console.log(`  ⚠️ Could not save transaction for pattern analysis:`, error.message);
             }
             
-            // Update token balance AFTER this transaction
+            // Update token balance for this transaction
             const balanceChange = swapInfo.type === 'buy' ? swapInfo.tokenAmount : -swapInfo.tokenAmount;
-            const newBalance = await updateKOLTokenBalance(
+            newBalanceAfterGroup = await updateKOLTokenBalance(
               kolAddress, 
               swapInfo.tokenMint, 
               balanceChange, 
               swapInfo.signature,
-              isFirstBuy && swapInfo.type === 'buy',
+              isFirstBuy && swapInfo.type === 'buy' && parsedTx === group.transactions[0], // Only mark first transaction as first buy
               tokenPrice,
               swapInfo.solAmount
             );
             
-            // Check if multiple KOLs have bought this token
-            let kolCount = 0;
-            let otherKOLs = [];
-            if (swapInfo.type === 'buy') {
-              // Get count AFTER updating (includes this KOL now)
-              kolCount = await getKOLCountForToken(swapInfo.tokenMint);
-              if (kolCount > 1) {
-                // Get list of all KOLs who bought this token
-                const allKOLs = await getKOLsForToken(swapInfo.tokenMint);
-                otherKOLs = allKOLs.filter(addr => addr !== kolAddress).map(addr => getKOLName(addr) || addr.substring(0, 8) + '...');
-              }
-            }
-            
-            // Check if this is a complete exit (had tokens before, selling, and balance goes to ~0)
-            const isCompleteExit = swapInfo.type === 'sell' && 
-                                   balanceBeforeTx > 0.000001 && 
-                                   newBalance <= 0.000001; // Consider 0 or very small balance as complete exit
-            
-            // Calculate hold time for sells
-            let holdTime = null;
-            if (swapInfo.type === 'sell') {
-              holdTime = await calculateHoldTime(kolAddress, swapInfo.tokenMint);
-            }
-            
-            // Analyze token pattern for smart alerts
-            let tokenPattern = null;
-            try {
-              tokenPattern = await analyzeTokenPattern(swapInfo.tokenMint);
-            } catch (error) {
-              console.log(`  ⚠️ Could not analyze token pattern:`, error.message);
-            }
-            
-            // Enhanced logging for balance tracking
-            console.log(`    📊 Balance: ${balanceBeforeTx.toFixed(6)} → ${newBalance.toFixed(6)} | First buy: ${isFirstBuy} | Complete exit: ${isCompleteExit}`);
-            if (holdTime !== null) {
-              console.log(`    ⏱️ Hold time: ${holdTime.toFixed(1)}s`);
-            }
-            if (tokenPattern) {
-              console.log(`    📈 Pattern: ${tokenPattern.kolCount} KOLs, ${tokenPattern.holdingKOLs} holding, avg hold: ${tokenPattern.avgHoldTime ? tokenPattern.avgHoldTime.toFixed(1) + 's' : 'N/A'}, Good token: ${tokenPattern.isGoodToken}`);
-            }
-            
-            // Show ALL transactions now (not just first buys)
-            // Smart alert: If it's a "good token" pattern, always alert
-            const isGoodTokenAlert = tokenPattern && tokenPattern.isGoodToken;
-            const shouldAlert = true; // Alert on all transactions now
-            
-            // Get token info (name, symbol)
-            let tokenInfo = null;
-            let marketCap = null;
-            
+            // Update cost basis and tokens bought for next iteration
+            const currentBalanceRecord = await getKOLTokenBalance(kolAddress, swapInfo.tokenMint);
+            costBasis = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_cost_basis || 0) : 0;
+            tokensBought = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_tokens_bought || 0) : 0;
+          }
+          
+          // Skip alert if all transactions in group were already alerted
+          if (allAlreadyAlerted) {
+            console.log(`  ⚠️ Skipping group alert: All transactions already alerted`);
+            continue;
+          }
+          
+          // Get aggregated swap info from group
+          const groupSwapInfo = {
+            type: group.type,
+            tokenMint: group.tokenMint,
+            tokenAmount: group.totalTokenAmount,
+            solAmount: group.totalSolAmount,
+            signature: group.signatures[0], // Use first signature as primary
+            signatures: group.signatures, // All signatures for links
+            timestamp: new Date(group.firstTime)
+          };
+          
+          // Get token info (name, symbol) - fetch once per group
+          if (!tokenInfo) {
             try {
               const { getSolanaTokenInfo } = require('../utils/api');
-              
-              // Fetch token metadata (name, symbol)
-              tokenInfo = await getSolanaTokenInfo(swapInfo.tokenMint);
+              tokenInfo = await getSolanaTokenInfo(groupSwapInfo.tokenMint);
               
               // Calculate market cap if we have price
               if (tokenPrice) {
@@ -566,225 +615,396 @@ async function checkKOLTransactions(bot) {
                 
                 // Save performance snapshot for long-term analysis
                 try {
-                  await saveTokenPerformance(swapInfo.tokenMint, tokenPrice, marketCap, null);
+                  await saveTokenPerformance(groupSwapInfo.tokenMint, tokenPrice, marketCap, null);
                 } catch (error) {
                   console.log(`  ⚠️ Could not save performance snapshot:`, error.message);
                 }
               }
             } catch (error) {
-              console.log(`  ⚠️ Could not fetch token info for ${swapInfo.tokenMint}:`, error.message);
+              console.log(`  ⚠️ Could not fetch token info for ${groupSwapInfo.tokenMint}:`, error.message);
             }
-            
-            // Calculate PnL for sells
-            let pnl = null;
-            let pnlPercentage = null;
-            if (swapInfo.type === 'sell' && tokenPrice && costBasis > 0 && tokensBought > 0) {
-              // Calculate average buy price
-              const avgBuyPrice = costBasis / tokensBought; // Average cost per token in SOL
-              
-              // Calculate sell value in SOL
-              const sellValueSOL = swapInfo.solAmount;
-              
-              // Calculate cost basis for sold tokens (proportional)
-              const tokensSold = swapInfo.tokenAmount;
-              const soldCostBasis = (tokensSold / tokensBought) * costBasis;
-              
-              // Calculate PnL
-              pnl = sellValueSOL - soldCostBasis; // PnL in SOL
-              pnlPercentage = soldCostBasis > 0 ? ((pnl / soldCostBasis) * 100) : 0;
+          }
+          
+          // Check if multiple KOLs have bought this token
+          let kolCount = 0;
+          let otherKOLs = [];
+          if (groupSwapInfo.type === 'buy') {
+            kolCount = await getKOLCountForToken(groupSwapInfo.tokenMint);
+            if (kolCount > 1) {
+              const allKOLs = await getKOLsForToken(groupSwapInfo.tokenMint);
+              otherKOLs = allKOLs.filter(addr => addr !== kolAddress).map(addr => getKOLName(addr) || addr.substring(0, 8) + '...');
             }
+          }
+          
+          // Check if this is a complete exit
+          const isCompleteExit = groupSwapInfo.type === 'sell' && 
+                                 balanceBeforeGroup > 0.000001 && 
+                                 newBalanceAfterGroup <= 0.000001;
+          
+          // Calculate hold time for sells
+          let holdTime = null;
+          if (groupSwapInfo.type === 'sell') {
+            holdTime = await calculateHoldTime(kolAddress, groupSwapInfo.tokenMint);
+          }
+          
+          // Get transaction statistics for this token
+          let txStats = null;
+          try {
+            const history = await getKOLTransactionHistory(kolAddress, groupSwapInfo.tokenMint, 1000);
+            const buys = history.filter(tx => tx.transaction_type === 'buy');
+            const sells = history.filter(tx => tx.transaction_type === 'sell');
+            const totalBuys = buys.length;
+            const totalSells = sells.length;
+            const totalBuyAmount = buys.reduce((sum, tx) => sum + parseFloat(tx.sol_amount || 0), 0);
+            const totalSellAmount = sells.reduce((sum, tx) => sum + parseFloat(tx.sol_amount || 0), 0);
             
-            // Format market cap helper
-            const formatMarketCap = (value) => {
-              if (!value) return 'N/A';
-              if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
-              if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
-              if (value >= 1e3) return `$${(value / 1e3).toFixed(2)}k`;
-              return `$${value.toFixed(2)}`;
+            txStats = {
+              totalTx: totalBuys + totalSells,
+              buys: totalBuys,
+              sells: totalSells,
+              totalBuyAmount,
+              totalSellAmount
             };
+          } catch (error) {
+            console.log(`  ⚠️ Could not get transaction stats:`, error.message);
+          }
+          
+          // Analyze token pattern
+          let tokenPattern = null;
+          try {
+            tokenPattern = await analyzeTokenPattern(groupSwapInfo.tokenMint);
+          } catch (error) {
+            console.log(`  ⚠️ Could not analyze token pattern:`, error.message);
+          }
+          
+          // Detect KOL behavior deviations
+          let behaviorDeviations = null;
+          try {
+            behaviorDeviations = await detectKOLDeviation(
+              kolAddress,
+              groupSwapInfo.type,
+              groupSwapInfo.solAmount,
+              groupSwapInfo.tokenMint
+            );
             
-            // Format token amount helper (e.g., 1m, 1.5k) - lowercase for display
-            const formatTokenAmount = (amount) => {
-              if (amount >= 1e9) return `${(amount / 1e9).toFixed(2)}b`;
-              if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}m`;
-              if (amount >= 1e3) return `${(amount / 1e3).toFixed(2)}k`;
-              return amount.toFixed(4);
-            };
-            
-            const kolName = getKOLName(kolAddress) || 'Unknown KOL';
-            const tokenName = tokenInfo?.name || 'Unknown Token';
-            const tokenSymbol = (tokenInfo?.symbol || swapInfo.tokenMint.substring(0, 8)).toUpperCase();
-            const tokenAddress = swapInfo.tokenMint;
-            
-            // Determine alert type and message prefix
-            let alertPrefix = '';
-            if (isGoodTokenAlert) {
-              alertPrefix = '⭐ GOOD TOKEN PATTERN - ';
-            } else if (isFirstBuy && swapInfo.type === 'buy') {
-              if (kolCount >= 2) {
-                // Multiple KOLs detected - this is more significant
-                alertPrefix = `🔥 ${kolCount} KOLs - `;
-              } else {
-                alertPrefix = '🆕 FIRST BUY - ';
-              }
-            } else if (swapInfo.type === 'buy') {
-              alertPrefix = '🟢 BUY - ';
-            } else if (isCompleteExit) {
-              alertPrefix = '🚪 COMPLETE EXIT - ';
-            } else if (swapInfo.type === 'sell') {
-              alertPrefix = '🔴 SELL - ';
-            }
-            
-            // Format timestamp for display
-            const txTimestamp = swapInfo.timestamp || new Date();
-            const formattedTime = txTimestamp.toLocaleString('en-US', {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: false
-            });
-            
-            // For multi-KOL buys, cache the list of KOLs who bought this token (only fetch once, not per user)
-            let allKOLsForToken = [];
-            const isMultiKOLBuy = kolCount >= 2 && swapInfo.type === 'buy' && isFirstBuy;
-            if (isMultiKOLBuy) {
-              allKOLsForToken = await getKOLsForToken(swapInfo.tokenMint);
-              console.log(`  🔥 Multi-KOL buy detected: ${kolCount} KOLs bought ${tokenSymbol}`);
-            }
-            
-            // Check all users to see if they're tracking this KOL or this token
-            let alertSent = false;
-            for (const [chatId, userPrefs] of Object.entries(users)) {
-              if (!userPrefs.subscribed) continue;
+            // Update behavior pattern after group
+            await updateKOLBehaviorPattern(kolAddress);
+          } catch (error) {
+            console.log(`  ⚠️ Could not detect behavior deviation:`, error.message);
+          }
+          
+          // Calculate PnL for sells using FIFO (more accurate than average cost basis)
+          let pnl = null;
+          let pnlPercentage = null;
+          let cumulativePnL = null;
+          let cumulativePnLPercentage = null;
+          
+          if (groupSwapInfo.type === 'sell') {
+            // Calculate cumulative realized PnL using FIFO matching
+            try {
+              const realizedPnLData = await calculateRealizedPnL(kolAddress, groupSwapInfo.tokenMint);
+              cumulativePnL = realizedPnLData.realizedPnL;
+              cumulativePnLPercentage = realizedPnLData.realizedPnLPercentage;
               
-              const trackedKOLs = userPrefs.trackedKOLs || [];
-              const isTrackingKOL = trackedKOLs.includes(kolAddress);
-              const isTrackingToken = isTrackedToken(swapInfo.tokenMint, userPrefs);
+              // For this specific sell, calculate PnL using FIFO
+              // Get transaction history and match this sell against buys
+              const history = await getKOLTransactionHistory(kolAddress, groupSwapInfo.tokenMint, 1000);
+              const sortedHistory = [...history].sort((a, b) => a.timestamp - b.timestamp);
               
-              // For multi-KOL buys, check if user tracks any of the KOLs who bought this token
-              let tracksAnyKOLInToken = false;
-              if (isMultiKOLBuy) {
-                tracksAnyKOLInToken = allKOLsForToken.some(addr => trackedKOLs.includes(addr));
-              }
+              const buyQueue = [];
+              let sellCostBasis = 0;
+              let tokensToSell = groupSwapInfo.tokenAmount;
               
-              console.log(`  👤 User ${chatId}: tracking KOL=${isTrackingKOL}, tracking token=${isTrackingToken}, multi-KOL=${isMultiKOLBuy ? kolCount : 0}`);
-              
-              // Send alert if:
-              // 1. User is tracking this specific KOL OR token, OR
-              // 2. Multiple KOLs (2+) bought it AND user tracks at least one of those KOLs, OR
-              // 3. It's a "good token" pattern (hold > 30s, multiple KOLs holding)
-              const shouldAlert = isTrackingKOL || isTrackingToken || (isMultiKOLBuy && tracksAnyKOLInToken) || isGoodTokenAlert;
-              
-              if (shouldAlert) {
-                const buyEmoji = '🟢';
-                const sellEmoji = '🔴';
-                const actionEmoji = swapInfo.type === 'buy' ? buyEmoji : sellEmoji;
+              // Build buy queue and process all transactions up to this sell
+              for (const tx of sortedHistory) {
+                if (tx.signature === groupSwapInfo.signature) break; // Stop at current sell
                 
-                // Build message in requested format
-                let message = '';
-                
-                // First line: KOL NAME 🟢/🔴 $SYMBOL @ Mcap
-                if (marketCap && tokenPrice) {
-                  message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b> @ ${formatMarketCap(marketCap)}\n`;
-                } else {
-                  message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b>\n`;
-                }
-                
-                // Timestamp
-                message += `🕐 ${formattedTime}\n`;
-                
-                // Show other KOLs if multiple KOLs bought this token
-                if (kolCount >= 2 && swapInfo.type === 'buy' && otherKOLs.length > 0) {
-                  message += `\n🔥 <b>${kolCount} KOLs</b> in this token:\n`;
-                  message += `• ${kolName}\n`;
-                  otherKOLs.forEach(otherKol => {
-                    message += `• ${otherKol}\n`;
+                if (tx.transaction_type === 'buy') {
+                  buyQueue.push({
+                    tokens: parseFloat(tx.token_amount || 0),
+                    costBasis: parseFloat(tx.sol_amount || 0)
                   });
-                  message += `\n`;
-                }
-                
-                // Amount tokens
-                message += `${formatTokenAmount(swapInfo.tokenAmount)} tokens\n`;
-                
-                // SOL paid
-                message += `${swapInfo.solAmount.toFixed(4)} SOL\n`;
-                
-                // HOLDS
-                message += `\nHOLDS: `;
-                if (newBalance > 0.000001) {
-                  message += `${formatTokenAmount(newBalance)} $${tokenSymbol}\n`;
-                } else {
-                  message += `0 $${tokenSymbol}\n`;
-                }
-                
-                // Hold time (for sells)
-                if (swapInfo.type === 'sell' && holdTime !== null) {
-                  const holdTimeFormatted = holdTime < 60 
-                    ? `${holdTime.toFixed(1)}s` 
-                    : holdTime < 3600 
-                      ? `${(holdTime / 60).toFixed(1)}m` 
-                      : `${(holdTime / 3600).toFixed(1)}h`;
-                  message += `\n⏱️ Hold time: ${holdTimeFormatted}\n`;
-                }
-                
-                // PnL (only for sells)
-                if (swapInfo.type === 'sell' && pnl !== null && pnlPercentage !== null) {
-                  const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
-                  const pnlSign = pnl >= 0 ? '+' : '';
-                  message += `\nPnL: ${pnlEmoji} ${pnlSign}${pnl.toFixed(4)} SOL (${pnlSign}${pnlPercentage.toFixed(2)}%)\n`;
-                }
-                
-                // Pattern analysis (for good tokens)
-                if (tokenPattern && tokenPattern.isGoodToken) {
-                  message += `\n⭐ <b>GOOD TOKEN PATTERN:</b>\n`;
-                  message += `• ${tokenPattern.kolCount} KOLs involved\n`;
-                  message += `• ${tokenPattern.holdingKOLs} still holding\n`;
-                  if (tokenPattern.avgHoldTime) {
-                    const avgHoldFormatted = tokenPattern.avgHoldTime < 60 
-                      ? `${tokenPattern.avgHoldTime.toFixed(1)}s` 
-                      : `${(tokenPattern.avgHoldTime / 60).toFixed(1)}m`;
-                    message += `• Avg hold: ${avgHoldFormatted}\n`;
+                } else if (tx.transaction_type === 'sell') {
+                  // Process previous sells to consume buys (FIFO)
+                  let prevTokensToSell = parseFloat(tx.token_amount || 0);
+                  while (prevTokensToSell > 0.000001 && buyQueue.length > 0) {
+                    const oldestBuy = buyQueue[0];
+                    if (oldestBuy.tokens <= prevTokensToSell) {
+                      prevTokensToSell -= oldestBuy.tokens;
+                      buyQueue.shift();
+                    } else {
+                      oldestBuy.tokens -= prevTokensToSell;
+                      oldestBuy.costBasis -= (oldestBuy.costBasis * (prevTokensToSell / (oldestBuy.tokens + prevTokensToSell)));
+                      prevTokensToSell = 0;
+                    }
                   }
                 }
+              }
+              
+              // Match this sell against remaining buys using FIFO
+              while (tokensToSell > 0.000001 && buyQueue.length > 0) {
+                const oldestBuy = buyQueue[0];
                 
-                // Contract
-                message += `\n<code>${tokenAddress}</code>\n`;
-                
-                // Links section
-                message += `\n`;
-                message += `<a href="https://solscan.io/tx/${swapInfo.signature}">Solscan</a> | `;
-                message += `<a href="https://gmgn.ai/sol/token/${tokenAddress}">GMGN</a> | `;
-                message += `<a href="https://padre.gg/token/${tokenAddress}">PADRE</a> | `;
-                message += `<a href="https://axiom.xyz/token/${tokenAddress}">AXIOM</a> | `;
-                message += `<a href="https://dexscreener.com/solana/${tokenAddress}">DEX</a>`;
-                
-                try {
+                if (oldestBuy.tokens <= tokensToSell) {
+                  sellCostBasis += oldestBuy.costBasis;
+                  tokensToSell -= oldestBuy.tokens;
+                  buyQueue.shift();
+                } else {
+                  const proportion = tokensToSell / oldestBuy.tokens;
+                  sellCostBasis += oldestBuy.costBasis * proportion;
+                  oldestBuy.tokens -= tokensToSell;
+                  oldestBuy.costBasis -= oldestBuy.costBasis * proportion;
+                  tokensToSell = 0;
+                }
+              }
+              
+              // Calculate PnL for this specific sell
+              if (sellCostBasis > 0) {
+                pnl = groupSwapInfo.solAmount - sellCostBasis;
+                pnlPercentage = ((pnl / sellCostBasis) * 100);
+              }
+            } catch (error) {
+              console.log(`  ⚠️ Could not calculate FIFO PnL:`, error.message);
+              // Fallback to simple calculation if FIFO fails
+              if (tokenPrice && costBasis > 0 && tokensBought > 0) {
+                const tokensSold = groupSwapInfo.tokenAmount;
+                const soldCostBasis = (tokensSold / tokensBought) * costBasis;
+                pnl = groupSwapInfo.solAmount - soldCostBasis;
+                pnlPercentage = soldCostBasis > 0 ? ((pnl / soldCostBasis) * 100) : 0;
+              }
+            }
+          }
+          
+          // Format helpers
+          const formatMarketCap = (value) => {
+            if (!value) return 'N/A';
+            if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
+            if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
+            if (value >= 1e3) return `$${(value / 1e3).toFixed(2)}k`;
+            return `$${value.toFixed(2)}`;
+          };
+          
+          const formatTokenAmount = (amount) => {
+            if (amount >= 1e9) return `${(amount / 1e9).toFixed(2)}b`;
+            if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}m`;
+            if (amount >= 1e3) return `${(amount / 1e3).toFixed(2)}k`;
+            return amount.toFixed(4);
+          };
+          
+          const kolName = getKOLName(kolAddress) || 'Unknown KOL';
+          const tokenName = tokenInfo?.name || 'Unknown Token';
+          const tokenSymbol = (tokenInfo?.symbol || groupSwapInfo.tokenMint.substring(0, 8)).toUpperCase();
+          const tokenAddress = groupSwapInfo.tokenMint;
+          
+          // Determine alert prefix
+          const isGoodTokenAlert = tokenPattern && tokenPattern.isGoodToken;
+          let alertPrefix = '';
+          if (isGoodTokenAlert) {
+            alertPrefix = '⭐ GOOD TOKEN PATTERN - ';
+          } else if (isFirstBuy && groupSwapInfo.type === 'buy') {
+            if (kolCount >= 2) {
+              alertPrefix = `🔥 ${kolCount} KOLs - `;
+            } else {
+              alertPrefix = '🆕 FIRST BUY - ';
+            }
+          } else if (groupSwapInfo.type === 'buy') {
+            alertPrefix = '🟢 BUY - ';
+          } else if (isCompleteExit) {
+            alertPrefix = '🚪 COMPLETE EXIT - ';
+          } else if (groupSwapInfo.type === 'sell') {
+            alertPrefix = '🔴 SELL - ';
+          }
+          
+          // Format timestamp
+          const formattedTime = groupSwapInfo.timestamp.toLocaleString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+          });
+          
+          // Build alert message
+          const buyEmoji = '🟢';
+          const sellEmoji = '🔴';
+          const actionEmoji = groupSwapInfo.type === 'buy' ? buyEmoji : sellEmoji;
+          
+          let message = '';
+          
+          // First line: KOL NAME 🟢/🔴 $SYMBOL @ Mcap
+          if (marketCap && tokenPrice) {
+            message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b> @ ${formatMarketCap(marketCap)}\n`;
+          } else {
+            message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b>\n`;
+          }
+          
+          // Show grouped indicator if multiple transactions
+          if (isGrouped) {
+            message += `📦 <b>${group.transactions.length} transactions grouped</b>\n`;
+          }
+          
+          // Timestamp
+          message += `🕐 ${formattedTime}\n`;
+          
+          // Show other KOLs if multiple KOLs bought this token
+          if (kolCount >= 2 && groupSwapInfo.type === 'buy' && otherKOLs.length > 0) {
+            message += `\n🔥 <b>${kolCount} KOLs</b> in this token:\n`;
+            message += `• ${kolName}\n`;
+            otherKOLs.forEach(otherKol => {
+              message += `• ${otherKol}\n`;
+            });
+            message += `\n`;
+          }
+          
+          // Amount tokens (aggregated)
+          message += `${formatTokenAmount(groupSwapInfo.tokenAmount)} tokens\n`;
+          
+          // SOL paid (aggregated)
+          message += `${groupSwapInfo.solAmount.toFixed(4)} SOL\n`;
+          
+          // HOLDS
+          message += `\nHOLDS: `;
+          if (newBalanceAfterGroup > 0.000001) {
+            message += `${formatTokenAmount(newBalanceAfterGroup)} $${tokenSymbol}\n`;
+          } else {
+            message += `0 $${tokenSymbol}\n`;
+          }
+          
+          // Show transaction statistics if multiple transactions
+          if (txStats && txStats.totalTx > 1) {
+            message += `\n📊 <b>Token Stats:</b>\n`;
+            message += `• ${txStats.buys} buy(s): ${txStats.totalBuyAmount.toFixed(4)} SOL\n`;
+            message += `• ${txStats.sells} sell(s): ${txStats.totalSellAmount.toFixed(4)} SOL\n`;
+            if (cumulativePnL !== null) {
+              const cumPnLEmoji = cumulativePnL >= 0 ? '🟢' : '🔴';
+              const cumPnLSign = cumulativePnL >= 0 ? '+' : '';
+              message += `• Total PnL: ${cumPnLEmoji} ${cumPnLSign}${cumulativePnL.toFixed(4)} SOL (${cumPnLSign}${cumulativePnLPercentage.toFixed(2)}%)\n`;
+            }
+          }
+          
+          // Hold time (for sells)
+          if (groupSwapInfo.type === 'sell' && holdTime !== null) {
+            const holdTimeFormatted = holdTime < 60 
+              ? `${holdTime.toFixed(1)}s` 
+              : holdTime < 3600 
+                ? `${(holdTime / 60).toFixed(1)}m` 
+                : `${(holdTime / 3600).toFixed(1)}h`;
+            message += `\n⏱️ Hold time: ${holdTimeFormatted}\n`;
+          }
+          
+          // PnL (only for sells) - show both this transaction and cumulative
+          if (groupSwapInfo.type === 'sell' && (pnl !== null || cumulativePnL !== null)) {
+            // Only show individual transaction PnL if not showing cumulative in stats section
+            if (!txStats || txStats.totalTx <= 1) {
+              if (pnl !== null && pnlPercentage !== null) {
+                const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
+                const pnlSign = pnl >= 0 ? '+' : '';
+                message += `\nPnL (this tx): ${pnlEmoji} ${pnlSign}${pnl.toFixed(4)} SOL (${pnlSign}${pnlPercentage.toFixed(2)}%)\n`;
+              }
+            } else if (pnl !== null && pnlPercentage !== null) {
+              // Show individual PnL even if we have stats (for grouped transactions)
+              const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
+              const pnlSign = pnl >= 0 ? '+' : '';
+              message += `\nPnL (this group): ${pnlEmoji} ${pnlSign}${pnl.toFixed(4)} SOL (${pnlSign}${pnlPercentage.toFixed(2)}%)\n`;
+            }
+            
+            // Show cumulative PnL if available and not already shown in stats
+            if (cumulativePnL !== null && cumulativePnLPercentage !== null && (!txStats || txStats.totalTx <= 1)) {
+              const cumPnLEmoji = cumulativePnL >= 0 ? '🟢' : '🔴';
+              const cumPnLSign = cumulativePnL >= 0 ? '+' : '';
+              message += `PnL (cumulative): ${cumPnLEmoji} ${cumPnLSign}${cumulativePnL.toFixed(4)} SOL (${cumPnLSign}${cumulativePnLPercentage.toFixed(2)}%)\n`;
+            }
+          }
+          
+          // Pattern analysis
+          if (tokenPattern && tokenPattern.isGoodToken) {
+            message += `\n⭐ <b>GOOD TOKEN PATTERN:</b>\n`;
+            message += `• ${tokenPattern.kolCount} KOLs involved\n`;
+            message += `• ${tokenPattern.holdingKOLs} still holding\n`;
+            if (tokenPattern.avgHoldTime) {
+              const avgHoldFormatted = tokenPattern.avgHoldTime < 60 
+                ? `${tokenPattern.avgHoldTime.toFixed(1)}s` 
+                : `${(tokenPattern.avgHoldTime / 60).toFixed(1)}m`;
+              message += `• Avg hold: ${avgHoldFormatted}\n`;
+            }
+          }
+          
+          // Behavior deviations
+          if (behaviorDeviations && behaviorDeviations.length > 0) {
+            message += `\n🚨 <b>BEHAVIOR DEVIATION:</b>\n`;
+            behaviorDeviations.forEach(dev => {
+              message += `• ${dev.message}\n`;
+            });
+          }
+          
+          // Contract
+          message += `\n<code>${tokenAddress}</code>\n`;
+          
+          // Links section - show first transaction link, or all if grouped
+          message += `\n`;
+          if (isGrouped) {
+            message += `<a href="https://solscan.io/tx/${group.signatures[0]}">Solscan (1st)</a> | `;
+            if (group.signatures.length > 1) {
+              message += `<a href="https://solscan.io/tx/${group.signatures[group.signatures.length - 1]}">Solscan (last)</a> | `;
+            }
+          } else {
+            message += `<a href="https://solscan.io/tx/${groupSwapInfo.signature}">Solscan</a> | `;
+          }
+          message += `<a href="https://gmgn.ai/sol/token/${tokenAddress}">GMGN</a> | `;
+          message += `<a href="https://padre.gg/token/${tokenAddress}">PADRE</a> | `;
+          message += `<a href="https://axiom.xyz/token/${tokenAddress}">AXIOM</a> | `;
+          message += `<a href="https://dexscreener.com/solana/${tokenAddress}">DEX</a>`;
+          
+          // Send alerts to all users tracking this KOL or token
+          let alertSent = false;
+          for (const [chatId, userPrefs] of Object.entries(users)) {
+            if (!userPrefs.subscribed) continue;
+            
+            const trackedKOLs = userPrefs.trackedKOLs || [];
+            const isTrackingKOL = trackedKOLs.includes(kolAddress);
+            const isTrackingToken = isTrackedToken(groupSwapInfo.tokenMint, userPrefs);
+            
+            const shouldAlert = isTrackingKOL || isTrackingToken || (kolCount >= 2 && groupSwapInfo.type === 'buy') || isGoodTokenAlert;
+            
+            if (shouldAlert) {
+              try {
+                // Send message with token image if available
+                if (tokenInfo && tokenInfo.imageUrl) {
+                  // Send photo with caption
+                  await bot.sendPhoto(chatId, tokenInfo.imageUrl, {
+                    caption: message,
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true
+                  });
+                } else {
+                  // Fallback to text-only message if no image
                   await bot.sendMessage(chatId, message, {
                     parse_mode: 'HTML',
                     disable_web_page_preview: true
                   });
-                  alertSent = true;
-                  
-                  // Mark this transaction as alerted
-                  await markTransactionAsAlerted(swapInfo.signature, kolAddress, swapInfo.tokenMint);
-                  
-                  const alertType = isFirstBuy ? 'FIRST BUY' : isCompleteExit ? 'COMPLETE EXIT' : swapInfo.type.toUpperCase();
-                  console.log(`  ✅ Sent KOL alert to user ${chatId} for ${kolName}'s ${alertType} of ${tokenName} ($${tokenSymbol})`);
-                } catch (error) {
-                  console.error(`  ❌ Error sending KOL alert to ${chatId}:`, error.message);
                 }
+                alertSent = true;
+                
+                // Mark all transactions in group as alerted
+                for (const sig of group.signatures) {
+                  await markTransactionAsAlerted(sig, kolAddress, groupSwapInfo.tokenMint);
+                }
+                
+                const alertType = isGrouped ? `${group.transactions.length} ${groupSwapInfo.type.toUpperCase()}S` : groupSwapInfo.type.toUpperCase();
+                console.log(`  ✅ Sent grouped KOL alert to user ${chatId} for ${kolName}'s ${alertType} of ${tokenName} ($${tokenSymbol})`);
+              } catch (error) {
+                console.error(`  ❌ Error sending KOL alert to ${chatId}:`, error.message);
               }
             }
-            
-            if (!alertSent) {
-              console.log(`  ⚠️ Swap detected but no users tracking this KOL or token`);
-            }
+          }
+          
+          if (!alertSent) {
+            console.log(`  ⚠️ Group detected but no users tracking this KOL or token`);
           }
         }
         
-        // Update persistent storage with newest signature after processing all new transactions
+        // Update persistent storage with newest signature after processing all groups
         if (newestSignature && (!lastSignature || newestSignature !== lastSignature)) {
           await saveKOLSignature(kolAddress, newestSignature);
           console.log(`  💾 Updated last signature for ${kolName}: ${newestSignature.substring(0, 16)}...`);
@@ -810,4 +1030,3 @@ async function checkKOLTransactions(bot) {
 module.exports = {
   checkKOLTransactions
 };
-

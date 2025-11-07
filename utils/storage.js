@@ -748,6 +748,83 @@ async function getKOLTransactionHistory(kolAddress, tokenMint, limit = 100) {
 }
 
 // Calculate hold time for a token (time between buy and sell)
+// Calculate realized PnL using FIFO (First In First Out) matching
+// This properly matches sells against buys in chronological order
+async function calculateRealizedPnL(kolAddress, tokenMint) {
+  const history = await getKOLTransactionHistory(kolAddress, tokenMint, 1000);
+  
+  if (history.length === 0) return { realizedPnL: 0, realizedPnLPercentage: 0, totalCostBasis: 0, totalProceeds: 0 };
+  
+  // Sort by timestamp ascending (oldest first)
+  const sortedHistory = [...history].sort((a, b) => a.timestamp - b.timestamp);
+  
+  // FIFO queue: array of { tokens, costBasis, timestamp }
+  const buyQueue = [];
+  let totalCostBasis = 0;
+  let totalProceeds = 0;
+  let realizedPnL = 0;
+  
+  for (const tx of sortedHistory) {
+    const tokenAmount = parseFloat(tx.token_amount || 0);
+    const solAmount = parseFloat(tx.sol_amount || 0);
+    
+    if (tx.transaction_type === 'buy') {
+      // Add to buy queue
+      buyQueue.push({
+        tokens: tokenAmount,
+        costBasis: solAmount,
+        timestamp: tx.timestamp
+      });
+    } else if (tx.transaction_type === 'sell') {
+      // Match against buys using FIFO
+      let tokensToSell = tokenAmount;
+      const sellProceeds = solAmount;
+      let sellCostBasis = 0;
+      
+      // Match sells against oldest buys first
+      while (tokensToSell > 0.000001 && buyQueue.length > 0) {
+        const oldestBuy = buyQueue[0];
+        
+        if (oldestBuy.tokens <= tokensToSell) {
+          // Use entire buy lot
+          const costBasisForThisLot = oldestBuy.costBasis;
+          sellCostBasis += costBasisForThisLot;
+          tokensToSell -= oldestBuy.tokens;
+          buyQueue.shift(); // Remove from queue
+        } else {
+          // Use partial buy lot (proportional)
+          const proportion = tokensToSell / oldestBuy.tokens;
+          const costBasisForThisLot = oldestBuy.costBasis * proportion;
+          sellCostBasis += costBasisForThisLot;
+          oldestBuy.tokens -= tokensToSell;
+          oldestBuy.costBasis -= costBasisForThisLot;
+          tokensToSell = 0;
+        }
+      }
+      
+      // Calculate PnL for this sell
+      if (sellCostBasis > 0) {
+        const pnl = sellProceeds - sellCostBasis;
+        realizedPnL += pnl;
+        totalCostBasis += sellCostBasis;
+        totalProceeds += sellProceeds;
+      }
+    }
+  }
+  
+  const realizedPnLPercentage = totalCostBasis > 0 ? ((realizedPnL / totalCostBasis) * 100) : 0;
+  
+  return {
+    realizedPnL,
+    realizedPnLPercentage,
+    totalCostBasis,
+    totalProceeds,
+    remainingBuys: buyQueue.length,
+    remainingTokens: buyQueue.reduce((sum, buy) => sum + buy.tokens, 0)
+  };
+}
+
+// Calculate hold time for a token (time between buy and sell)
 async function calculateHoldTime(kolAddress, tokenMint) {
   const history = await getKOLTransactionHistory(kolAddress, tokenMint, 50);
   
@@ -1166,6 +1243,276 @@ async function runLongTermAnalysis(days = 7) {
   return null;
 }
 
+// Update KOL behavior pattern based on transactions
+async function updateKOLBehaviorPattern(kolAddress) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      // Get all transactions for this KOL
+      const transactions = await pool.query(`
+        SELECT transaction_type, sol_amount, token_amount, timestamp
+        FROM kol_transactions
+        WHERE kol_address = $1
+        ORDER BY timestamp DESC
+        LIMIT 100
+      `, [kolAddress]);
+      
+      if (transactions.rows.length === 0) return null;
+      
+      const buys = transactions.rows.filter(tx => tx.transaction_type === 'buy');
+      const sells = transactions.rows.filter(tx => tx.transaction_type === 'sell');
+      
+      // Calculate average buy/sell sizes
+      const avgBuySize = buys.length > 0 
+        ? buys.reduce((sum, tx) => sum + (tx.sol_amount || 0), 0) / buys.length 
+        : 0;
+      const avgSellSize = sells.length > 0
+        ? sells.reduce((sum, tx) => sum + (tx.sol_amount || 0), 0) / sells.length
+        : 0;
+      
+      // Get typical buy sizes (most common amounts)
+      const buySizes = buys.map(tx => tx.sol_amount || 0).filter(s => s > 0);
+      const buySizeCounts = {};
+      buySizes.forEach(size => {
+        const rounded = Math.round(size * 100) / 100; // Round to 0.01
+        buySizeCounts[rounded] = (buySizeCounts[rounded] || 0) + 1;
+      });
+      const typicalBuySizes = Object.entries(buySizeCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([size]) => parseFloat(size));
+      
+      // Get typical sell sizes
+      const sellSizes = sells.map(tx => tx.sol_amount || 0).filter(s => s > 0);
+      const sellSizeCounts = {};
+      sellSizes.forEach(size => {
+        const rounded = Math.round(size * 100) / 100;
+        sellSizeCounts[rounded] = (sellSizeCounts[rounded] || 0) + 1;
+      });
+      const typicalSellSizes = Object.entries(sellSizeCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([size]) => parseFloat(size));
+      
+      // Calculate hold times
+      const holdTimes = [];
+      for (let i = 0; i < transactions.rows.length - 1; i++) {
+        const tx1 = transactions.rows[i];
+        const tx2 = transactions.rows[i + 1];
+        
+        if (tx1.transaction_type === 'sell' && tx2.transaction_type === 'buy' && tx1.token_amount && tx2.token_amount) {
+          // Check if same token
+          const token1 = await pool.query(`SELECT token_mint FROM kol_transactions WHERE signature = $1`, [tx1.signature || '']);
+          const token2 = await pool.query(`SELECT token_mint FROM kol_transactions WHERE signature = $1`, [tx2.signature || '']);
+          
+          if (token1.rows[0]?.token_mint === token2.rows[0]?.token_mint) {
+            const holdTime = tx1.timestamp - tx2.timestamp; // seconds
+            if (holdTime > 0 && holdTime < 86400) { // Less than 24 hours
+              holdTimes.push(holdTime);
+            }
+          }
+        }
+      }
+      
+      const avgHoldTime = holdTimes.length > 0
+        ? holdTimes.reduce((a, b) => a + b, 0) / holdTimes.length
+        : null;
+      const maxHoldTime = holdTimes.length > 0 ? Math.max(...holdTimes) : null;
+      const minHoldTime = holdTimes.length > 0 ? Math.min(...holdTimes) : null;
+      
+      // Save pattern
+      await pool.query(`
+        INSERT INTO kol_behavior_patterns (
+          kol_address, avg_buy_size, avg_sell_size, avg_hold_time,
+          typical_buy_sizes, typical_sell_sizes, max_hold_time, min_hold_time,
+          buy_count, sell_count, total_tokens_traded, last_updated
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT(kol_address) DO UPDATE SET
+          avg_buy_size = EXCLUDED.avg_buy_size,
+          avg_sell_size = EXCLUDED.avg_sell_size,
+          avg_hold_time = EXCLUDED.avg_hold_time,
+          typical_buy_sizes = EXCLUDED.typical_buy_sizes,
+          typical_sell_sizes = EXCLUDED.typical_sell_sizes,
+          max_hold_time = EXCLUDED.max_hold_time,
+          min_hold_time = EXCLUDED.min_hold_time,
+          buy_count = EXCLUDED.buy_count,
+          sell_count = EXCLUDED.sell_count,
+          total_tokens_traded = EXCLUDED.total_tokens_traded,
+          last_updated = EXCLUDED.last_updated
+      `, [
+        kolAddress,
+        avgBuySize,
+        avgSellSize,
+        avgHoldTime,
+        JSON.stringify(typicalBuySizes),
+        JSON.stringify(typicalSellSizes),
+        maxHoldTime,
+        minHoldTime,
+        buys.length,
+        sells.length,
+        transactions.rows.length
+      ]);
+      
+      return {
+        avgBuySize,
+        avgSellSize,
+        avgHoldTime,
+        typicalBuySizes,
+        typicalSellSizes,
+        maxHoldTime,
+        minHoldTime
+      };
+    } catch (error) {
+      console.error('Error updating KOL behavior pattern:', error.message);
+      return null;
+    }
+  }
+  return null;
+}
+
+// Get KOL behavior pattern
+async function getKOLBehaviorPattern(kolAddress) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query(`
+        SELECT * FROM kol_behavior_patterns WHERE kol_address = $1
+      `, [kolAddress]);
+      
+      if (result.rows.length > 0) {
+        const pattern = result.rows[0];
+        return {
+          avgBuySize: pattern.avg_buy_size,
+          avgSellSize: pattern.avg_sell_size,
+          avgHoldTime: pattern.avg_hold_time,
+          typicalBuySizes: JSON.parse(pattern.typical_buy_sizes || '[]'),
+          typicalSellSizes: JSON.parse(pattern.typical_sell_sizes || '[]'),
+          maxHoldTime: pattern.max_hold_time,
+          minHoldTime: pattern.min_hold_time
+        };
+      }
+    } catch (error) {
+      console.error('Error getting KOL behavior pattern:', error.message);
+    }
+  }
+  return null;
+}
+
+// Detect if current transaction deviates from KOL's normal pattern
+async function detectKOLDeviation(kolAddress, transactionType, solAmount, tokenMint) {
+  const pattern = await getKOLBehaviorPattern(kolAddress);
+  
+  if (!pattern || !pattern.typicalBuySizes || pattern.typicalBuySizes.length === 0) {
+    // No pattern yet, update it
+    await updateKOLBehaviorPattern(kolAddress);
+    return null;
+  }
+  
+  const deviations = [];
+  
+  // Get recent transaction sequence for this token to detect pattern deviations
+  const { getDatabase } = require('./database');
+  const pool = await getDatabase();
+  if (pool) {
+    try {
+      // Get last 10 transactions for this token by this KOL
+      const recentTxs = await pool.query(`
+        SELECT transaction_type, sol_amount, timestamp
+        FROM kol_transactions
+        WHERE kol_address = $1 AND token_mint = $2
+        ORDER BY timestamp DESC
+        LIMIT 10
+      `, [kolAddress, tokenMint]);
+      
+      // Detect pattern: Large buy FIRST, then test buys, then sell
+      // OR: Test buys first, then large buy, then sell
+      if (transactionType === 'buy' && recentTxs.rows.length > 0) {
+        const lastTx = recentTxs.rows[0];
+        
+        // Check if this is a LARGE buy after test buys (pattern: test → large)
+        const isLargeBuy = solAmount > 1.5; // > 1.5 SOL
+        const isTestBuy = solAmount < 0.5; // < 0.5 SOL
+        
+        if (isLargeBuy) {
+          // Check if there were test buys before this
+          const testBuysBefore = recentTxs.rows.filter(tx => 
+            tx.transaction_type === 'buy' && 
+            (tx.sol_amount || 0) < 0.5 &&
+            tx.timestamp < (lastTx.timestamp || 0)
+          );
+          
+          if (testBuysBefore.length > 0) {
+            // Pattern detected: Test buys → Large buy (this is NORMAL pattern)
+            // But if NO test buys before large buy, that's unusual!
+          } else {
+            // Large buy WITHOUT test buys first = UNUSUAL (might be a good token!)
+            deviations.push({
+              type: 'large_buy_without_test',
+              message: `🚨 Large buy ${solAmount.toFixed(3)} SOL WITHOUT test buys first - might be confident!`,
+              severity: 'high'
+            });
+          }
+        }
+        
+        // Check if this is a test buy AFTER a large buy (unusual - usually test first)
+        if (isTestBuy && lastTx.transaction_type === 'buy' && (lastTx.sol_amount || 0) > 1.5) {
+          deviations.push({
+            type: 'test_buy_after_large',
+            message: `⚠️ Test buy AFTER large buy - unusual sequence`,
+            severity: 'medium'
+          });
+        }
+      }
+      
+      // Detect: Holding longer than usual (good sign)
+      if (transactionType === 'sell') {
+        const holdTime = await calculateHoldTime(kolAddress, tokenMint);
+        if (holdTime !== null && pattern.avgHoldTime) {
+          // If holding 3x longer than average, that's significant
+          if (holdTime > pattern.avgHoldTime * 3) {
+            deviations.push({
+              type: 'unusually_long_hold',
+              message: `⭐ Holding ${(holdTime / 60).toFixed(1)}m (avg: ${(pattern.avgHoldTime / 60).toFixed(1)}m) - CONFIDENCE SIGNAL!`,
+              severity: 'high'
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error detecting pattern deviation:', error.message);
+    }
+  }
+  
+  // Original deviation checks
+  if (transactionType === 'buy') {
+    const isTypicalSize = pattern.typicalBuySizes.some(size => 
+      Math.abs(solAmount - size) < 0.1
+    );
+    
+    if (!isTypicalSize) {
+      // Much larger than average?
+      if (solAmount > pattern.avgBuySize * 2.5) {
+        deviations.push({
+          type: 'unusually_large_buy',
+          message: `Large buy: ${solAmount.toFixed(3)} SOL (avg: ${pattern.avgBuySize.toFixed(3)} SOL)`,
+          severity: 'high'
+        });
+      }
+    }
+  }
+  
+  return deviations.length > 0 ? deviations : null;
+}
+
 module.exports = {
   loadUsers,
   saveUsers,
@@ -1190,10 +1537,14 @@ module.exports = {
   saveKOLTransaction,
   getKOLTransactionHistory,
   calculateHoldTime,
+  calculateRealizedPnL,
   analyzeTokenPattern,
   saveTokenPerformance,
   analyzeTokenPerformance,
   getWinningTokens,
-  runLongTermAnalysis
+  runLongTermAnalysis,
+  updateKOLBehaviorPattern,
+  detectKOLDeviation,
+  getKOLBehaviorPattern
 };
 

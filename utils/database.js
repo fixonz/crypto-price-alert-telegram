@@ -183,6 +183,24 @@ async function initDatabase() {
       ON token_analysis(analysis_date DESC)
     `);
     
+    // Create kol_behavior_patterns table to track individual KOL trading patterns
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_behavior_patterns (
+        kol_address TEXT PRIMARY KEY,
+        avg_buy_size REAL,
+        avg_sell_size REAL,
+        avg_hold_time REAL,
+        typical_buy_sizes TEXT, -- JSON array of typical buy amounts
+        typical_sell_sizes TEXT, -- JSON array of typical sell amounts
+        max_hold_time REAL,
+        min_hold_time REAL,
+        buy_count INTEGER DEFAULT 0,
+        sell_count INTEGER DEFAULT 0,
+        total_tokens_traded INTEGER DEFAULT 0,
+        last_updated BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000
+      )
+    `);
+    
     // Verify tables were created
     const tablesResult = await pool.query(`
       SELECT table_name 
