@@ -692,6 +692,9 @@ async function checkKOLTransactions(bot) {
                   message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b>\n`;
                 }
                 
+                // Timestamp
+                message += `🕐 ${formattedTime}\n`;
+                
                 // Show other KOLs if multiple KOLs bought this token
                 if (kolCount >= 2 && swapInfo.type === 'buy' && otherKOLs.length > 0) {
                   message += `\n🔥 <b>${kolCount} KOLs</b> in this token:\n`;
