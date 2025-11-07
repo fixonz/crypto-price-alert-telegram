@@ -447,6 +447,7 @@ async function parseSwapTransaction(tx, kolAddress) {
         
         // Sanity check: if sell amount seems suspiciously low for the token amount, try Solscan
         // If we're selling a significant amount of tokens (> 1M) but SOL received is < 0.1, something is wrong
+        // Also check if PnL would be extremely negative (suggests wrong sell amount)
         if (amount > 1000000 && solAmount < 0.1 && signature) {
           console.log(`    ⚠️ Suspiciously low SOL amount for sell: ${solAmount.toFixed(4)} SOL for ${amount.toFixed(0)} tokens. Fetching from Solscan...`);
           try {
@@ -458,6 +459,16 @@ async function parseSwapTransaction(tx, kolAddress) {
           } catch (error) {
             console.log(`    ⚠️ Solscan fetch failed:`, error.message);
           }
+        }
+        // Additional check: if sell amount is very small (< 0.1 SOL) but we have significant SOL received, use that instead
+        else if (solAmount < 0.1 && totalSignificantSolReceived > solAmount * 2) {
+          console.log(`    ⚠️ Sell amount ${solAmount.toFixed(4)} SOL seems too low. Using total significant SOL received: ${totalSignificantSolReceived.toFixed(4)} SOL`);
+          solAmount = totalSignificantSolReceived;
+        }
+        // Another check: if largest SOL received is much larger than detected amount, use it
+        else if (solAmount < 0.1 && largestSolReceived > solAmount * 2 && largestSolReceived > 0.1) {
+          console.log(`    ⚠️ Sell amount ${solAmount.toFixed(4)} SOL seems too low. Using largest SOL received: ${largestSolReceived.toFixed(4)} SOL`);
+          solAmount = largestSolReceived;
         }
         
         console.log(`    💰 Sell SOL detection: events=${solAmountFromEvents || 'N/A'}, inner=${solAmountFromInnerInstructions || 'N/A'}, desc=${solAmountFromDescription || 'N/A'}, significant=${totalSignificantSolReceived.toFixed(4)}, largest=${largestSolReceived.toFixed(4)}, total=${solReceived.toFixed(4)}, net=${solChange.toFixed(4)}, using=${solAmount.toFixed(4)}`);
