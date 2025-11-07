@@ -712,6 +712,68 @@ async function checkKOLTransactions(bot) {
             holdTime = await calculateHoldTime(kolAddress, groupSwapInfo.tokenMint);
           }
           
+          // Analyze instant flips (buy then sell within 1 minute in same group)
+          let instantFlipAnalysis = null;
+          if (isMixed && group.buys.length > 0 && group.sells.length > 0) {
+            // Sort buys and sells by timestamp
+            const sortedBuys = [...group.buys].sort((a, b) => {
+              const timeA = a.swapInfo.timestamp ? a.swapInfo.timestamp.getTime() : 0;
+              const timeB = b.swapInfo.timestamp ? b.swapInfo.timestamp.getTime() : 0;
+              return timeA - timeB;
+            });
+            const sortedSells = [...group.sells].sort((a, b) => {
+              const timeA = a.swapInfo.timestamp ? a.swapInfo.timestamp.getTime() : 0;
+              const timeB = b.swapInfo.timestamp ? b.swapInfo.timestamp.getTime() : 0;
+              return timeA - timeB;
+            });
+            
+            const instantFlips = [];
+            const flipTimes = [];
+            
+            // Check each sell against buys to find instant flips
+            for (const sell of sortedSells) {
+              const sellTime = sell.swapInfo.timestamp ? sell.swapInfo.timestamp.getTime() : Date.now();
+              
+              // Find the most recent buy before this sell
+              for (let i = sortedBuys.length - 1; i >= 0; i--) {
+                const buy = sortedBuys[i];
+                const buyTime = buy.swapInfo.timestamp ? buy.swapInfo.timestamp.getTime() : Date.now();
+                const timeDiff = (sellTime - buyTime) / 1000; // seconds
+                
+                if (timeDiff >= 0 && timeDiff <= 60) { // Within 1 minute
+                  instantFlips.push({
+                    buyTime: buyTime,
+                    sellTime: sellTime,
+                    timeDiff: timeDiff,
+                    buyAmount: buy.swapInfo.tokenAmount,
+                    sellAmount: sell.swapInfo.tokenAmount,
+                    buySol: buy.swapInfo.solAmount,
+                    sellSol: sell.swapInfo.solAmount
+                  });
+                  flipTimes.push(timeDiff);
+                  break; // Found matching buy, move to next sell
+                }
+              }
+            }
+            
+            if (instantFlips.length > 0) {
+              const avgFlipTime = flipTimes.reduce((a, b) => a + b, 0) / flipTimes.length;
+              const fastestFlip = Math.min(...flipTimes);
+              const totalFlipPnL = instantFlips.reduce((sum, flip) => {
+                return sum + (flip.sellSol - flip.buySol);
+              }, 0);
+              
+              instantFlipAnalysis = {
+                count: instantFlips.length,
+                avgTime: avgFlipTime,
+                fastestTime: fastestFlip,
+                totalPnL: totalFlipPnL,
+                isInstantFlip: fastestFlip < 60, // True if any flip is under 1 minute
+                flips: instantFlips
+              };
+            }
+          }
+          
           // Get transaction statistics for this token
           let txStats = null;
           try {
@@ -751,6 +813,18 @@ async function checkKOLTransactions(bot) {
               groupSwapInfo.solAmount,
               groupSwapInfo.tokenMint
             );
+            
+            // Add instant flip deviation if detected
+            if (instantFlipAnalysis && instantFlipAnalysis.isInstantFlip) {
+              if (!behaviorDeviations) {
+                behaviorDeviations = [];
+              }
+              behaviorDeviations.push({
+                type: 'instant_flip',
+                message: `⚡ Instant flip detected: ${instantFlipAnalysis.count} flip${instantFlipAnalysis.count > 1 ? 's' : ''} within ${instantFlipAnalysis.fastestTime.toFixed(1)}s - ${instantFlipAnalysis.fastestTime < 10 ? 'ULTRA-FAST (scalping?)' : 'Quick profit-taking'}`,
+                severity: instantFlipAnalysis.fastestTime < 10 ? 'high' : 'medium'
+              });
+            }
             
             // Update behavior pattern after group
             await updateKOLBehaviorPattern(kolAddress);
@@ -969,6 +1043,44 @@ async function checkKOLTransactions(bot) {
                 ? `${(holdTime / 60).toFixed(1)}m` 
                 : `${(holdTime / 3600).toFixed(1)}h`;
             message += `\n⏱️ Hold time: ${holdTimeFormatted}\n`;
+          }
+          
+          // Instant flip analysis (buy then sell within 1 minute)
+          if (instantFlipAnalysis && instantFlipAnalysis.isInstantFlip) {
+            const fastestTimeFormatted = instantFlipAnalysis.fastestTime < 1
+              ? `${(instantFlipAnalysis.fastestTime * 1000).toFixed(0)}ms`
+              : instantFlipAnalysis.fastestTime < 60
+                ? `${instantFlipAnalysis.fastestTime.toFixed(1)}s`
+                : `${(instantFlipAnalysis.fastestTime / 60).toFixed(1)}m`;
+            const avgTimeFormatted = instantFlipAnalysis.avgTime < 1
+              ? `${(instantFlipAnalysis.avgTime * 1000).toFixed(0)}ms`
+              : instantFlipAnalysis.avgTime < 60
+                ? `${instantFlipAnalysis.avgTime.toFixed(1)}s`
+                : `${(instantFlipAnalysis.avgTime / 60).toFixed(1)}m`;
+            
+            message += `\n⚡ <b>INSTANT FLIP DETECTED!</b>\n`;
+            message += `• ${instantFlipAnalysis.count} flip${instantFlipAnalysis.count > 1 ? 's' : ''} within 1 minute\n`;
+            message += `• Fastest: ${fastestTimeFormatted}\n`;
+            message += `• Avg time: ${avgTimeFormatted}\n`;
+            
+            if (instantFlipAnalysis.totalPnL !== 0) {
+              const flipPnLEmoji = instantFlipAnalysis.totalPnL >= 0 ? '🟢' : '🔴';
+              const flipPnLSign = instantFlipAnalysis.totalPnL >= 0 ? '+' : '';
+              message += `• Flip PnL: ${flipPnLEmoji} ${flipPnLSign}${instantFlipAnalysis.totalPnL.toFixed(4)} SOL\n`;
+            }
+            
+            // Add warning if instant flip is very fast (< 10 seconds)
+            if (instantFlipAnalysis.fastestTime < 10) {
+              message += `\n⚠️ <b>ULTRA-FAST FLIP</b> - Possible scalping or low confidence!\n`;
+            }
+          } else if (instantFlipAnalysis && !instantFlipAnalysis.isInstantFlip) {
+            // Show flip analysis even if not instant (for reference)
+            const fastestTimeFormatted = instantFlipAnalysis.fastestTime < 60
+              ? `${instantFlipAnalysis.fastestTime.toFixed(1)}s`
+              : `${(instantFlipAnalysis.fastestTime / 60).toFixed(1)}m`;
+            message += `\n📊 <b>Flip Analysis:</b>\n`;
+            message += `• ${instantFlipAnalysis.count} buy→sell pair${instantFlipAnalysis.count > 1 ? 's' : ''} detected\n`;
+            message += `• Fastest flip: ${fastestTimeFormatted}\n`;
           }
           
           // PnL (only for sells) - show both this transaction and cumulative
