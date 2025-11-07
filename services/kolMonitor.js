@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { KOL_ADDRESSES } = require('../config/kol');
-const { loadUsers, loadKOLSignatures, saveKOLSignature } = require('../utils/storage');
+const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted } = require('../utils/storage');
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
@@ -255,8 +255,42 @@ async function checkKOLTransactions(bot) {
         let newTransactionsFound = 0;
         let newestSignature = null;
         
-        // Process transactions (newest first)
+        // Extract signatures and filter to only new transactions
+        // Helius returns newest first: [newest, ..., oldest]
+        // We need to process only transactions newer than lastSignature, then reverse to process oldest-first
+        const newTransactions = [];
+        let foundLastSignature = false;
+        
         for (const tx of transactions) {
+          let sig = tx.signature || tx.transaction?.signatures?.[0] || tx.transaction?.signature || tx.txHash;
+          
+          if (!sig) continue;
+          
+          // Track newest signature (first one in the array)
+          if (!newestSignature) {
+            newestSignature = sig;
+          }
+          
+          // If we hit the last processed signature, we've found all new ones
+          if (lastSignature && sig === lastSignature) {
+            foundLastSignature = true;
+            break; // Stop here, we've collected all new transactions
+          }
+          
+          // This is a new transaction, add it
+          newTransactions.push(tx);
+        }
+        
+        // If we didn't find lastSignature, all transactions are new (first run or gap in history)
+        if (!foundLastSignature && lastSignature) {
+          console.log(`  ⚠️ Last signature not found in current batch, processing all transactions`);
+        }
+        
+        // Reverse to process oldest-first for correct balance tracking
+        const transactionsInOrder = newTransactions.reverse();
+        
+        // Process transactions (oldest first for correct balance tracking)
+        for (const tx of transactionsInOrder) {
           // Try multiple possible signature locations (Helius format variations)
           let signature = null;
           
@@ -285,17 +319,6 @@ async function checkKOLTransactions(bot) {
             continue;
           }
           
-          // Track newest signature
-          if (!newestSignature) {
-            newestSignature = signature;
-          }
-          
-          // Skip if we've already processed this transaction
-          if (lastSignature && signature === lastSignature) {
-            console.log(`  ✅ Reached last processed transaction, stopping`);
-            break;
-          }
-          
           newTransactionsFound++;
           console.log(`  🔍 Processing new transaction: ${signature.substring(0, 16)}...`);
           
@@ -309,19 +332,111 @@ async function checkKOLTransactions(bot) {
           }
           
           if (swapInfo && swapInfo.tokenMint) {
-            // Get token price to calculate market cap
+            // Get token price first (needed for PnL calculation and buy price tracking)
             let tokenPrice = null;
-            let marketCap = null;
             try {
               const { getSolanaTokenPrice } = require('../utils/api');
               const priceData = await getSolanaTokenPrice(swapInfo.tokenMint);
               if (priceData && priceData.price) {
                 tokenPrice = parseFloat(priceData.price);
-                // Calculate market cap (price × 1B supply for Solana tokens)
-                marketCap = tokenPrice * 1e9;
               }
             } catch (error) {
               console.log(`  ⚠️ Could not fetch price for token ${swapInfo.tokenMint}:`, error.message);
+            }
+            
+            // Check if we've already alerted on this transaction
+            const alreadyAlerted = await hasAlertedOnTransaction(swapInfo.signature);
+            if (alreadyAlerted) {
+              console.log(`  ⚠️ Skipping alert: Already alerted on transaction ${swapInfo.signature.substring(0, 16)}...`);
+              // Still update balance but don't alert
+              const balanceChange = swapInfo.type === 'buy' ? swapInfo.tokenAmount : -swapInfo.tokenAmount;
+              await updateKOLTokenBalance(
+                kolAddress, 
+                swapInfo.tokenMint, 
+                balanceChange, 
+                swapInfo.signature,
+                false, // Don't mark as first buy if we've already alerted
+                tokenPrice,
+                swapInfo.solAmount
+              );
+              continue;
+            }
+            
+            // Get current balance BEFORE this transaction
+            const currentBalanceRecord = await getKOLTokenBalance(kolAddress, swapInfo.tokenMint);
+            const balanceBeforeTx = currentBalanceRecord ? parseFloat(currentBalanceRecord.balance) : 0;
+            const costBasis = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_cost_basis || 0) : 0;
+            const tokensBought = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_tokens_bought || 0) : 0;
+            const isFirstBuy = !currentBalanceRecord || !currentBalanceRecord.first_buy_signature;
+            
+            // Update token balance AFTER this transaction
+            const balanceChange = swapInfo.type === 'buy' ? swapInfo.tokenAmount : -swapInfo.tokenAmount;
+            const newBalance = await updateKOLTokenBalance(
+              kolAddress, 
+              swapInfo.tokenMint, 
+              balanceChange, 
+              swapInfo.signature,
+              isFirstBuy && swapInfo.type === 'buy',
+              tokenPrice,
+              swapInfo.solAmount
+            );
+            
+            // Check if this is a complete exit (had tokens before, selling, and balance goes to ~0)
+            const isCompleteExit = swapInfo.type === 'sell' && 
+                                   balanceBeforeTx > 0.000001 && 
+                                   newBalance <= 0.000001; // Consider 0 or very small balance as complete exit
+            
+            // Only alert on first-time buys or complete exits
+            if (swapInfo.type === 'buy' && !isFirstBuy) {
+              console.log(`  ⚠️ Skipping alert: Not a first-time buy (KOL already owns this token, balance before: ${balanceBeforeTx.toFixed(4)})`);
+              continue; // Skip repetitive buys
+            }
+            
+            if (swapInfo.type === 'sell' && !isCompleteExit) {
+              console.log(`  ⚠️ Skipping alert: Partial sell (KOL had ${balanceBeforeTx.toFixed(4)}, now has ${newBalance.toFixed(4)} tokens)`);
+              continue; // Skip partial sells
+            }
+            
+            // Log for debugging
+            if (isCompleteExit) {
+              console.log(`  ✅ Complete exit detected: Balance went from ${balanceBeforeTx.toFixed(4)} to ${newBalance.toFixed(4)}`);
+            }
+            
+            // Get token info (name, symbol)
+            let tokenInfo = null;
+            let marketCap = null;
+            
+            try {
+              const { getSolanaTokenInfo } = require('../utils/api');
+              
+              // Fetch token metadata (name, symbol)
+              tokenInfo = await getSolanaTokenInfo(swapInfo.tokenMint);
+              
+              // Calculate market cap if we have price
+              if (tokenPrice) {
+                marketCap = tokenPrice * 1e9; // Calculate market cap (price × 1B supply for Solana tokens)
+              }
+            } catch (error) {
+              console.log(`  ⚠️ Could not fetch token info for ${swapInfo.tokenMint}:`, error.message);
+            }
+            
+            // Calculate PnL for sells
+            let pnl = null;
+            let pnlPercentage = null;
+            if (swapInfo.type === 'sell' && tokenPrice && costBasis > 0 && tokensBought > 0) {
+              // Calculate average buy price
+              const avgBuyPrice = costBasis / tokensBought; // Average cost per token in SOL
+              
+              // Calculate sell value in SOL
+              const sellValueSOL = swapInfo.solAmount;
+              
+              // Calculate cost basis for sold tokens (proportional)
+              const tokensSold = swapInfo.tokenAmount;
+              const soldCostBasis = (tokensSold / tokensBought) * costBasis;
+              
+              // Calculate PnL
+              pnl = sellValueSOL - soldCostBasis; // PnL in SOL
+              pnlPercentage = soldCostBasis > 0 ? ((pnl / soldCostBasis) * 100) : 0;
             }
             
             // Format market cap helper
@@ -333,7 +448,37 @@ async function checkKOLTransactions(bot) {
               return `$${value.toFixed(2)}`;
             };
             
+            // Format token amount helper (e.g., 1m, 1.5k) - lowercase for display
+            const formatTokenAmount = (amount) => {
+              if (amount >= 1e9) return `${(amount / 1e9).toFixed(2)}b`;
+              if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}m`;
+              if (amount >= 1e3) return `${(amount / 1e3).toFixed(2)}k`;
+              return amount.toFixed(4);
+            };
+            
             const kolName = getKOLName(kolAddress) || 'Unknown KOL';
+            const tokenName = tokenInfo?.name || 'Unknown Token';
+            const tokenSymbol = (tokenInfo?.symbol || swapInfo.tokenMint.substring(0, 8)).toUpperCase();
+            const tokenAddress = swapInfo.tokenMint;
+            
+            // Determine alert type and message prefix
+            let alertPrefix = '';
+            if (isFirstBuy && swapInfo.type === 'buy') {
+              alertPrefix = '🆕 FIRST BUY - ';
+            } else if (isCompleteExit) {
+              alertPrefix = '🚪 COMPLETE EXIT - ';
+            }
+            
+            // Format timestamp for display
+            const txTimestamp = swapInfo.timestamp || new Date();
+            const formattedTime = txTimestamp.toLocaleString('en-US', {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false
+            });
             
             // Check all users to see if they're tracking this KOL or this token
             let alertSent = false;
@@ -348,27 +493,51 @@ async function checkKOLTransactions(bot) {
               
               // Send alert if user is tracking this KOL OR this token
               if (isTrackingKOL || isTrackingToken) {
-                // Get token info from user's custom tokens
-                const tokenInfo = userPrefs.customTokens?.find(t => 
-                  t.address?.toLowerCase() === swapInfo.tokenMint.toLowerCase()
-                );
+                const buyEmoji = '🟢';
+                const sellEmoji = '🔴';
+                const actionEmoji = swapInfo.type === 'buy' ? buyEmoji : sellEmoji;
                 
-                const tokenSymbol = tokenInfo?.symbol || swapInfo.tokenMint.substring(0, 8) + '...';
-                const action = swapInfo.type === 'buy' ? '🟢 BOUGHT' : '🔴 SOLD';
+                // Build message in requested format
+                let message = '';
                 
-                let message = `🚨 <b>KOL Alert!</b>\n\n` +
-                  `${action} <b>$${tokenSymbol.toUpperCase()}</b>\n` +
-                  `👤 <b>${kolName}</b>\n` +
-                  `💰 Amount: ${swapInfo.tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 4 })} tokens\n` +
-                  `💵 SOL: ${swapInfo.solAmount.toFixed(4)} SOL\n`;
-                
-                // Add market cap if available
+                // First line: KOL NAME 🟢/🔴 $SYMBOL @ Mcap
                 if (marketCap && tokenPrice) {
-                  message += `📊 Price: $${tokenPrice.toFixed(8)}\n`;
-                  message += `💎 Market Cap: ${formatMarketCap(marketCap)}\n`;
+                  message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b> @ ${formatMarketCap(marketCap)}\n`;
+                } else {
+                  message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b>\n`;
                 }
                 
-                message += `\n🔗 <a href="https://solscan.io/tx/${swapInfo.signature}">View Transaction</a>`;
+                // Amount tokens
+                message += `${formatTokenAmount(swapInfo.tokenAmount)} tokens\n`;
+                
+                // SOL paid
+                message += `${swapInfo.solAmount.toFixed(4)} SOL\n`;
+                
+                // HOLDS
+                message += `\nHOLDS: `;
+                if (newBalance > 0.000001) {
+                  message += `${formatTokenAmount(newBalance)} $${tokenSymbol}\n`;
+                } else {
+                  message += `0 $${tokenSymbol}\n`;
+                }
+                
+                // PnL (only for sells)
+                if (swapInfo.type === 'sell' && pnl !== null && pnlPercentage !== null) {
+                  const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
+                  const pnlSign = pnl >= 0 ? '+' : '';
+                  message += `\nPnL: ${pnlEmoji} ${pnlSign}${pnl.toFixed(4)} SOL (${pnlSign}${pnlPercentage.toFixed(2)}%)\n`;
+                }
+                
+                // Contract
+                message += `\n<code>${tokenAddress}</code>\n`;
+                
+                // Links section
+                message += `\n`;
+                message += `<a href="https://solscan.io/tx/${swapInfo.signature}">Solscan</a> | `;
+                message += `<a href="https://gmgn.ai/sol/token/${tokenAddress}">GMGN</a> | `;
+                message += `<a href="https://padre.gg/token/${tokenAddress}">PADRE</a> | `;
+                message += `<a href="https://axiom.xyz/token/${tokenAddress}">AXIOM</a> | `;
+                message += `<a href="https://dexscreener.com/solana/${tokenAddress}">DEX</a>`;
                 
                 try {
                   await bot.sendMessage(chatId, message, {
@@ -376,7 +545,12 @@ async function checkKOLTransactions(bot) {
                     disable_web_page_preview: true
                   });
                   alertSent = true;
-                  console.log(`  ✅ Sent KOL alert to user ${chatId} for ${kolName}'s ${swapInfo.type} of ${tokenSymbol} at ${formatMarketCap(marketCap)}`);
+                  
+                  // Mark this transaction as alerted
+                  await markTransactionAsAlerted(swapInfo.signature, kolAddress, swapInfo.tokenMint);
+                  
+                  const alertType = isFirstBuy ? 'FIRST BUY' : isCompleteExit ? 'COMPLETE EXIT' : swapInfo.type.toUpperCase();
+                  console.log(`  ✅ Sent KOL alert to user ${chatId} for ${kolName}'s ${alertType} of ${tokenName} ($${tokenSymbol})`);
                 } catch (error) {
                   console.error(`  ❌ Error sending KOL alert to ${chatId}:`, error.message);
                 }

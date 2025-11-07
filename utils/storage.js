@@ -369,6 +369,226 @@ async function saveKOLSignature(kolAddress, signature) {
   }
 }
 
+// Get KOL token balance for a specific token
+async function getKOLTokenBalance(kolAddress, tokenMint) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query(
+        'SELECT * FROM kol_token_balances WHERE kol_address = $1 AND token_mint = $2',
+        [kolAddress, tokenMint]
+      );
+      
+      if (result.rows.length > 0) {
+        return result.rows[0];
+      }
+      return null;
+    } catch (error) {
+      console.error('Error loading KOL token balance from database:', error.message);
+      return null;
+    }
+  }
+  
+  // Fallback to JSON
+  const KOL_BALANCES_FILE = path.join(__dirname, '..', 'kol_token_balances.json');
+  try {
+    const data = await fs.readFile(KOL_BALANCES_FILE, 'utf8');
+    const balances = JSON.parse(data);
+    const key = `${kolAddress}_${tokenMint}`;
+    return balances[key] || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Check if we've already alerted on this transaction
+async function hasAlertedOnTransaction(signature) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query(
+        'SELECT signature FROM kol_alerted_transactions WHERE signature = $1',
+        [signature]
+      );
+      return result.rows.length > 0;
+    } catch (error) {
+      console.error('Error checking alerted transaction:', error.message);
+      return false;
+    }
+  }
+  
+  // Fallback to JSON
+  const ALERTED_FILE = path.join(__dirname, '..', 'kol_alerted_transactions.json');
+  try {
+    const data = await fs.readFile(ALERTED_FILE, 'utf8');
+    const alerted = JSON.parse(data);
+    return alerted[signature] === true;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Mark transaction as alerted
+async function markTransactionAsAlerted(signature, kolAddress, tokenMint) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      await pool.query(`
+        INSERT INTO kol_alerted_transactions (signature, kol_address, token_mint, alerted_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT(signature) DO NOTHING
+      `, [signature, kolAddress, tokenMint, Date.now()]);
+      return;
+    } catch (error) {
+      console.error('Error marking transaction as alerted:', error.message);
+      throw error;
+    }
+  }
+  
+  // Fallback to JSON
+  const ALERTED_FILE = path.join(__dirname, '..', 'kol_alerted_transactions.json');
+  try {
+    let alerted = {};
+    try {
+      const data = await fs.readFile(ALERTED_FILE, 'utf8');
+      alerted = JSON.parse(data);
+    } catch (error) {
+      // File doesn't exist yet
+    }
+    alerted[signature] = true;
+    await fs.writeFile(ALERTED_FILE, JSON.stringify(alerted, null, 2), 'utf8');
+  } catch (error) {
+    console.error(`❌ Error saving alerted transactions:`, error.message);
+    throw error;
+  }
+}
+
+// Update KOL token balance (for buys and sells)
+async function updateKOLTokenBalance(kolAddress, tokenMint, balanceChange, signature, isFirstBuy = false, buyPrice = null, solAmount = null) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      // Get current balance
+      const current = await getKOLTokenBalance(kolAddress, tokenMint);
+      const currentBalance = current ? parseFloat(current.balance) : 0;
+      const currentCostBasis = current ? parseFloat(current.total_cost_basis || 0) : 0;
+      const currentTokensBought = current ? parseFloat(current.total_tokens_bought || 0) : 0;
+      const newBalance = Math.max(0, currentBalance + balanceChange); // Ensure balance doesn't go negative
+      
+      let newCostBasis = currentCostBasis;
+      let newTokensBought = currentTokensBought;
+      
+      // If this is a buy, update cost basis
+      if (balanceChange > 0 && buyPrice && solAmount) {
+        const tokensBought = balanceChange;
+        const costInSOL = solAmount;
+        newCostBasis = currentCostBasis + costInSOL;
+        newTokensBought = currentTokensBought + tokensBought;
+      }
+      
+      if (isFirstBuy && !current) {
+        // First time buying this token
+        await pool.query(`
+          INSERT INTO kol_token_balances (kol_address, token_mint, balance, first_buy_signature, first_buy_timestamp, first_buy_price, total_cost_basis, total_tokens_bought, last_updated)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT(kol_address, token_mint) DO UPDATE SET
+            balance = EXCLUDED.balance,
+            total_cost_basis = EXCLUDED.total_cost_basis,
+            total_tokens_bought = EXCLUDED.total_tokens_bought,
+            last_updated = EXCLUDED.last_updated
+        `, [kolAddress, tokenMint, newBalance, signature, Date.now(), buyPrice || 0, newCostBasis, newTokensBought, Date.now()]);
+      } else {
+        // Update existing balance
+        await pool.query(`
+          INSERT INTO kol_token_balances (kol_address, token_mint, balance, total_cost_basis, total_tokens_bought, last_updated)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT(kol_address, token_mint) DO UPDATE SET
+            balance = EXCLUDED.balance,
+            total_cost_basis = EXCLUDED.total_cost_basis,
+            total_tokens_bought = EXCLUDED.total_tokens_bought,
+            last_updated = EXCLUDED.last_updated
+        `, [kolAddress, tokenMint, newBalance, newCostBasis, newTokensBought, Date.now()]);
+      }
+      return newBalance;
+    } catch (error) {
+      console.error('Error updating KOL token balance in database:', error.message);
+      throw error;
+    }
+  }
+  
+  // Fallback to JSON
+  const KOL_BALANCES_FILE = path.join(__dirname, '..', 'kol_token_balances.json');
+  try {
+    let balances = {};
+    try {
+      const data = await fs.readFile(KOL_BALANCES_FILE, 'utf8');
+      balances = JSON.parse(data);
+    } catch (error) {
+      // File doesn't exist yet, start with empty object
+    }
+    
+    const key = `${kolAddress}_${tokenMint}`;
+    const current = balances[key] || { balance: 0, total_cost_basis: 0, total_tokens_bought: 0 };
+    const currentBalance = parseFloat(current.balance) || 0;
+    const currentCostBasis = parseFloat(current.total_cost_basis || 0) || 0;
+    const currentTokensBought = parseFloat(current.total_tokens_bought || 0) || 0;
+    const newBalance = Math.max(0, currentBalance + balanceChange);
+    
+    let newCostBasis = currentCostBasis;
+    let newTokensBought = currentTokensBought;
+    
+    // If this is a buy, update cost basis
+    if (balanceChange > 0 && buyPrice && solAmount) {
+      const tokensBought = balanceChange;
+      const costInSOL = solAmount;
+      newCostBasis = currentCostBasis + costInSOL;
+      newTokensBought = currentTokensBought + tokensBought;
+    }
+    
+    if (isFirstBuy && !current.first_buy_signature) {
+      balances[key] = {
+        balance: newBalance,
+        first_buy_signature: signature,
+        first_buy_timestamp: Date.now(),
+        first_buy_price: buyPrice || 0,
+        total_cost_basis: newCostBasis,
+        total_tokens_bought: newTokensBought,
+        last_updated: Date.now()
+      };
+    } else {
+      balances[key] = {
+        ...current,
+        balance: newBalance,
+        total_cost_basis: newCostBasis,
+        total_tokens_bought: newTokensBought,
+        last_updated: Date.now()
+      };
+    }
+    
+    await fs.writeFile(KOL_BALANCES_FILE, JSON.stringify(balances, null, 2), 'utf8');
+    return newBalance;
+  } catch (error) {
+    console.error(`❌ Error saving KOL token balances to ${KOL_BALANCES_FILE}:`, error.message);
+    throw error;
+  }
+}
+
 // Update user preferences
 async function updateUserPreferences(chatId, updates) {
   const users = await loadUsers();
@@ -409,6 +629,10 @@ module.exports = {
   getTempFlag,
   clearTempFlag,
   loadKOLSignatures,
-  saveKOLSignature
+  saveKOLSignature,
+  getKOLTokenBalance,
+  updateKOLTokenBalance,
+  hasAlertedOnTransaction,
+  markTransactionAsAlerted
 };
 

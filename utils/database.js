@@ -80,6 +80,32 @@ async function initDatabase() {
       )
     `);
     
+    // Create kol_token_balances table to track KOL token balances and purchase history
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_token_balances (
+        kol_address TEXT,
+        token_mint TEXT,
+        balance REAL DEFAULT 0,
+        first_buy_signature TEXT,
+        first_buy_timestamp BIGINT,
+        first_buy_price REAL,
+        total_cost_basis REAL DEFAULT 0,
+        total_tokens_bought REAL DEFAULT 0,
+        last_updated BIGINT,
+        PRIMARY KEY (kol_address, token_mint)
+      )
+    `);
+    
+    // Create kol_alerted_transactions table to track which transactions we've already alerted on
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_alerted_transactions (
+        signature TEXT PRIMARY KEY,
+        kol_address TEXT,
+        token_mint TEXT,
+        alerted_at BIGINT
+      )
+    `);
+    
     // Verify tables were created
     const tablesResult = await pool.query(`
       SELECT table_name 
