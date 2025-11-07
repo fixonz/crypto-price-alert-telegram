@@ -66,33 +66,38 @@ async function processPendingBuyAlerts(bot) {
         // Send alert to all users
         const users = await loadUsers();
         for (const [chatId, userPrefs] of Object.entries(users)) {
-          if (userPrefs.subscribed && userPrefs.kolAlerts !== false) {
-            try {
-              if (alert.tokenInfo && alert.tokenInfo.imageUrl) {
-                await bot.sendPhoto(chatId, alert.tokenInfo.imageUrl, {
-                  caption: finalMessage,
-                  parse_mode: 'HTML',
-                  disable_web_page_preview: true
-                });
-              } else {
-                await bot.sendMessage(chatId, finalMessage, {
-                  parse_mode: 'HTML',
-                  disable_web_page_preview: true
-                });
-              }
-              
-              // Mark sell transactions as alerted if any
-              if (sellsAfterBuy.length > 0) {
-                for (const sellTx of sellsAfterBuy) {
-                  await markTransactionAsAlerted(sellTx.signature, alert.kolAddress, alert.tokenMint);
+          if (userPrefs.subscribed) {
+            // Check if user wants KOL alerts (default to true if not set)
+            const wantsKolAlerts = userPrefs.kolAlerts !== false;
+            
+            if (wantsKolAlerts) {
+              try {
+                if (alert.tokenInfo && alert.tokenInfo.imageUrl) {
+                  await bot.sendPhoto(chatId, alert.tokenInfo.imageUrl, {
+                    caption: finalMessage,
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true
+                  });
+                } else {
+                  await bot.sendMessage(chatId, finalMessage, {
+                    parse_mode: 'HTML',
+                    disable_web_page_preview: true
+                  });
                 }
-              }
-            } catch (error) {
-              if (error.response?.statusCode === 403 || error.response?.statusCode === 400) {
-                const { loadUsers, saveUsers } = require('../utils/storage');
-                const users = await loadUsers();
-                delete users[chatId];
-                await saveUsers(users);
+                
+                // Mark sell transactions as alerted if any
+                if (sellsAfterBuy.length > 0) {
+                  for (const sellTx of sellsAfterBuy) {
+                    await markTransactionAsAlerted(sellTx.signature, alert.kolAddress, alert.tokenMint);
+                  }
+                }
+              } catch (error) {
+                if (error.response?.statusCode === 403 || error.response?.statusCode === 400) {
+                  const { loadUsers, saveUsers } = require('../utils/storage');
+                  const users = await loadUsers();
+                  delete users[chatId];
+                  await saveUsers(users);
+                }
               }
             }
           }
@@ -652,7 +657,12 @@ function groupTransactions(parsedTransactions, groupTimeWindowMs = 120000) { // 
 async function checkKOLTransactions(bot) {
   try {
     // Process pending buy alerts first (check if 1 minute has passed)
-    await processPendingBuyAlerts(bot);
+    try {
+      await processPendingBuyAlerts(bot);
+    } catch (error) {
+      console.error('Error processing pending buy alerts:', error.message);
+      // Don't stop the main flow if pending alerts fail
+    }
     
     const users = await loadUsers();
     
@@ -1596,6 +1606,7 @@ async function checkKOLTransactions(bot) {
     }
   } catch (error) {
     console.error('Error in checkKOLTransactions:', error.message);
+    console.error('Stack trace:', error.stack);
   }
 }
 
