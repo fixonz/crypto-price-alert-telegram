@@ -693,6 +693,168 @@ async function updateUserPreferences(chatId, updates) {
   return users[chatId];
 }
 
+// Save transaction to kol_transactions table for pattern analysis
+async function saveKOLTransaction(signature, kolAddress, tokenMint, transactionType, tokenAmount, solAmount, tokenPrice, timestamp) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      await pool.query(`
+        INSERT INTO kol_transactions 
+        (signature, kol_address, token_mint, transaction_type, token_amount, sol_amount, token_price, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT(signature) DO UPDATE SET
+          token_amount = EXCLUDED.token_amount,
+          sol_amount = EXCLUDED.sol_amount,
+          token_price = EXCLUDED.token_price
+      `, [signature, kolAddress, tokenMint, transactionType, tokenAmount, solAmount, tokenPrice || null, timestamp]);
+      return;
+    } catch (error) {
+      console.error('Error saving KOL transaction:', error.message);
+      throw error;
+    }
+  }
+  
+  // Fallback to JSON (optional, for pattern analysis we prefer DB)
+  // JSON fallback can be added if needed
+}
+
+// Get transaction history for a KOL and token (for pattern analysis)
+async function getKOLTransactionHistory(kolAddress, tokenMint, limit = 100) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      const result = await pool.query(`
+        SELECT * FROM kol_transactions
+        WHERE kol_address = $1 AND token_mint = $2
+        ORDER BY timestamp DESC
+        LIMIT $3
+      `, [kolAddress, tokenMint, limit]);
+      
+      return result.rows;
+    } catch (error) {
+      console.error('Error getting KOL transaction history:', error.message);
+      return [];
+    }
+  }
+  return [];
+}
+
+// Calculate hold time for a token (time between buy and sell)
+async function calculateHoldTime(kolAddress, tokenMint) {
+  const history = await getKOLTransactionHistory(kolAddress, tokenMint, 50);
+  
+  if (history.length < 2) return null;
+  
+  // Find most recent buy and sell
+  let lastBuy = null;
+  let lastSell = null;
+  
+  for (const tx of history) {
+    if (tx.transaction_type === 'buy' && !lastBuy) {
+      lastBuy = tx;
+    }
+    if (tx.transaction_type === 'sell' && !lastSell) {
+      lastSell = tx;
+    }
+  }
+  
+  // If we have a buy but no sell yet, calculate time since buy
+  if (lastBuy && !lastSell) {
+    const holdTimeMs = Date.now() - (lastBuy.timestamp * 1000);
+    return holdTimeMs / 1000; // Return in seconds
+  }
+  
+  // If we have both buy and sell, calculate time between them
+  if (lastBuy && lastSell && lastBuy.timestamp > lastSell.timestamp) {
+    const holdTimeMs = (lastBuy.timestamp - lastSell.timestamp) * 1000;
+    return holdTimeMs / 1000; // Return in seconds
+  }
+  
+  return null;
+}
+
+// Analyze token pattern - check if it's a "good" token based on KOL behavior
+async function analyzeTokenPattern(tokenMint) {
+  await ensureDatabaseInitialized();
+  if (db) {
+    try {
+      const { getDatabase } = require('./database');
+      const pool = await getDatabase();
+      if (!pool) throw new Error('Database not initialized');
+      
+      // Get all transactions for this token
+      const result = await pool.query(`
+        SELECT kol_address, transaction_type, timestamp, sol_amount
+        FROM kol_transactions
+        WHERE token_mint = $1
+        ORDER BY timestamp DESC
+        LIMIT 100
+      `, [tokenMint]);
+      
+      const transactions = result.rows;
+      if (transactions.length === 0) return null;
+      
+      // Group by KOL
+      const kolTransactions = {};
+      for (const tx of transactions) {
+        if (!kolTransactions[tx.kol_address]) {
+          kolTransactions[tx.kol_address] = [];
+        }
+        kolTransactions[tx.kol_address].push(tx);
+      }
+      
+      // Analyze patterns
+      let kolCount = Object.keys(kolTransactions).length;
+      let totalBuys = transactions.filter(tx => tx.transaction_type === 'buy').length;
+      let totalSells = transactions.filter(tx => tx.transaction_type === 'sell').length;
+      
+      // Calculate average hold times
+      let holdTimes = [];
+      for (const [kolAddress, txs] of Object.entries(kolTransactions)) {
+        const holdTime = await calculateHoldTime(kolAddress, tokenMint);
+        if (holdTime !== null && holdTime > 0) {
+          holdTimes.push(holdTime);
+        }
+      }
+      
+      const avgHoldTime = holdTimes.length > 0 
+        ? holdTimes.reduce((a, b) => a + b, 0) / holdTimes.length 
+        : null;
+      
+      // Check if KOLs are holding (bought but haven't sold)
+      let holdingKOLs = 0;
+      for (const [kolAddress, txs] of Object.entries(kolTransactions)) {
+        const lastTx = txs[0]; // Most recent transaction
+        if (lastTx.transaction_type === 'buy') {
+          holdingKOLs++;
+        }
+      }
+      
+      return {
+        kolCount,
+        totalBuys,
+        totalSells,
+        avgHoldTime,
+        holdingKOLs,
+        buySellRatio: totalSells > 0 ? totalBuys / totalSells : totalBuys,
+        isGoodToken: avgHoldTime !== null && avgHoldTime > 30 && holdingKOLs > 0 // Hold > 30s and still holding
+      };
+    } catch (error) {
+      console.error('Error analyzing token pattern:', error.message);
+      return null;
+    }
+  }
+  return null;
+}
+
 module.exports = {
   loadUsers,
   saveUsers,
@@ -713,6 +875,10 @@ module.exports = {
   hasAlertedOnTransaction,
   markTransactionAsAlerted,
   getKOLCountForToken,
-  getKOLsForToken
+  getKOLsForToken,
+  saveKOLTransaction,
+  getKOLTransactionHistory,
+  calculateHoldTime,
+  analyzeTokenPattern
 };
 

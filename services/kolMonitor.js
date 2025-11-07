@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { KOL_ADDRESSES } = require('../config/kol');
-const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken } = require('../utils/storage');
+const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken, saveKOLTransaction, calculateHoldTime, analyzeTokenPattern } = require('../utils/storage');
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
@@ -439,6 +439,23 @@ async function checkKOLTransactions(bot) {
             const tokensBought = currentBalanceRecord ? parseFloat(currentBalanceRecord.total_tokens_bought || 0) : 0;
             const isFirstBuy = !currentBalanceRecord || !currentBalanceRecord.first_buy_signature;
             
+            // Save transaction to database for pattern analysis
+            const txTimestampUnix = swapInfo.timestamp ? Math.floor(swapInfo.timestamp.getTime() / 1000) : Math.floor(Date.now() / 1000);
+            try {
+              await saveKOLTransaction(
+                swapInfo.signature,
+                kolAddress,
+                swapInfo.tokenMint,
+                swapInfo.type,
+                swapInfo.tokenAmount,
+                swapInfo.solAmount,
+                tokenPrice,
+                txTimestampUnix
+              );
+            } catch (error) {
+              console.log(`  ⚠️ Could not save transaction for pattern analysis:`, error.message);
+            }
+            
             // Update token balance AFTER this transaction
             const balanceChange = swapInfo.type === 'buy' ? swapInfo.tokenAmount : -swapInfo.tokenAmount;
             const newBalance = await updateKOLTokenBalance(
@@ -451,10 +468,10 @@ async function checkKOLTransactions(bot) {
               swapInfo.solAmount
             );
             
-            // Check if multiple KOLs have bought this token (for first buys only)
+            // Check if multiple KOLs have bought this token
             let kolCount = 0;
             let otherKOLs = [];
-            if (swapInfo.type === 'buy' && isFirstBuy) {
+            if (swapInfo.type === 'buy') {
               // Get count AFTER updating (includes this KOL now)
               kolCount = await getKOLCountForToken(swapInfo.tokenMint);
               if (kolCount > 1) {
@@ -469,24 +486,33 @@ async function checkKOLTransactions(bot) {
                                    balanceBeforeTx > 0.000001 && 
                                    newBalance <= 0.000001; // Consider 0 or very small balance as complete exit
             
+            // Calculate hold time for sells
+            let holdTime = null;
+            if (swapInfo.type === 'sell') {
+              holdTime = await calculateHoldTime(kolAddress, swapInfo.tokenMint);
+            }
+            
+            // Analyze token pattern for smart alerts
+            let tokenPattern = null;
+            try {
+              tokenPattern = await analyzeTokenPattern(swapInfo.tokenMint);
+            } catch (error) {
+              console.log(`  ⚠️ Could not analyze token pattern:`, error.message);
+            }
+            
             // Enhanced logging for balance tracking
             console.log(`    📊 Balance: ${balanceBeforeTx.toFixed(6)} → ${newBalance.toFixed(6)} | First buy: ${isFirstBuy} | Complete exit: ${isCompleteExit}`);
-            
-            // Only alert on first-time buys or complete exits
-            if (swapInfo.type === 'buy' && !isFirstBuy) {
-              console.log(`  ⚠️ Skipping alert: Not a first-time buy (KOL already owns this token, balance before: ${balanceBeforeTx.toFixed(4)})`);
-              continue; // Skip repetitive buys
+            if (holdTime !== null) {
+              console.log(`    ⏱️ Hold time: ${holdTime.toFixed(1)}s`);
+            }
+            if (tokenPattern) {
+              console.log(`    📈 Pattern: ${tokenPattern.kolCount} KOLs, ${tokenPattern.holdingKOLs} holding, avg hold: ${tokenPattern.avgHoldTime ? tokenPattern.avgHoldTime.toFixed(1) + 's' : 'N/A'}, Good token: ${tokenPattern.isGoodToken}`);
             }
             
-            if (swapInfo.type === 'sell' && !isCompleteExit) {
-              console.log(`  ⚠️ Skipping alert: Partial sell (KOL had ${balanceBeforeTx.toFixed(4)}, now has ${newBalance.toFixed(4)} tokens)`);
-              continue; // Skip partial sells
-            }
-            
-            // Log for debugging
-            if (isCompleteExit) {
-              console.log(`  ✅ Complete exit detected: Balance went from ${balanceBeforeTx.toFixed(4)} to ${newBalance.toFixed(4)}`);
-            }
+            // Show ALL transactions now (not just first buys)
+            // Smart alert: If it's a "good token" pattern, always alert
+            const isGoodTokenAlert = tokenPattern && tokenPattern.isGoodToken;
+            const shouldAlert = true; // Alert on all transactions now
             
             // Get token info (name, symbol)
             let tokenInfo = null;
@@ -549,17 +575,21 @@ async function checkKOLTransactions(bot) {
             
             // Determine alert type and message prefix
             let alertPrefix = '';
-            if (isFirstBuy && swapInfo.type === 'buy') {
+            if (isGoodTokenAlert) {
+              alertPrefix = '⭐ GOOD TOKEN PATTERN - ';
+            } else if (isFirstBuy && swapInfo.type === 'buy') {
               if (kolCount >= 2) {
                 // Multiple KOLs detected - this is more significant
                 alertPrefix = `🔥 ${kolCount} KOLs - `;
               } else {
-                // First KOL to buy - only alert if user is tracking this specific KOL
-                // (We'll filter this in the user loop)
                 alertPrefix = '🆕 FIRST BUY - ';
               }
+            } else if (swapInfo.type === 'buy') {
+              alertPrefix = '🟢 BUY - ';
             } else if (isCompleteExit) {
               alertPrefix = '🚪 COMPLETE EXIT - ';
+            } else if (swapInfo.type === 'sell') {
+              alertPrefix = '🔴 SELL - ';
             }
             
             // Format timestamp for display
@@ -600,8 +630,9 @@ async function checkKOLTransactions(bot) {
               
               // Send alert if:
               // 1. User is tracking this specific KOL OR token, OR
-              // 2. Multiple KOLs (2+) bought it AND user tracks at least one of those KOLs
-              const shouldAlert = isTrackingKOL || isTrackingToken || (isMultiKOLBuy && tracksAnyKOLInToken);
+              // 2. Multiple KOLs (2+) bought it AND user tracks at least one of those KOLs, OR
+              // 3. It's a "good token" pattern (hold > 30s, multiple KOLs holding)
+              const shouldAlert = isTrackingKOL || isTrackingToken || (isMultiKOLBuy && tracksAnyKOLInToken) || isGoodTokenAlert;
               
               if (shouldAlert) {
                 const buyEmoji = '🟢';
@@ -642,11 +673,34 @@ async function checkKOLTransactions(bot) {
                   message += `0 $${tokenSymbol}\n`;
                 }
                 
+                // Hold time (for sells)
+                if (swapInfo.type === 'sell' && holdTime !== null) {
+                  const holdTimeFormatted = holdTime < 60 
+                    ? `${holdTime.toFixed(1)}s` 
+                    : holdTime < 3600 
+                      ? `${(holdTime / 60).toFixed(1)}m` 
+                      : `${(holdTime / 3600).toFixed(1)}h`;
+                  message += `\n⏱️ Hold time: ${holdTimeFormatted}\n`;
+                }
+                
                 // PnL (only for sells)
                 if (swapInfo.type === 'sell' && pnl !== null && pnlPercentage !== null) {
                   const pnlEmoji = pnl >= 0 ? '🟢' : '🔴';
                   const pnlSign = pnl >= 0 ? '+' : '';
                   message += `\nPnL: ${pnlEmoji} ${pnlSign}${pnl.toFixed(4)} SOL (${pnlSign}${pnlPercentage.toFixed(2)}%)\n`;
+                }
+                
+                // Pattern analysis (for good tokens)
+                if (tokenPattern && tokenPattern.isGoodToken) {
+                  message += `\n⭐ <b>GOOD TOKEN PATTERN:</b>\n`;
+                  message += `• ${tokenPattern.kolCount} KOLs involved\n`;
+                  message += `• ${tokenPattern.holdingKOLs} still holding\n`;
+                  if (tokenPattern.avgHoldTime) {
+                    const avgHoldFormatted = tokenPattern.avgHoldTime < 60 
+                      ? `${tokenPattern.avgHoldTime.toFixed(1)}s` 
+                      : `${(tokenPattern.avgHoldTime / 60).toFixed(1)}m`;
+                    message += `• Avg hold: ${avgHoldFormatted}\n`;
+                  }
                 }
                 
                 // Contract

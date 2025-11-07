@@ -106,6 +106,32 @@ async function initDatabase() {
       )
     `);
     
+    // Create kol_transactions table to track all transactions for pattern analysis
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_transactions (
+        signature TEXT PRIMARY KEY,
+        kol_address TEXT,
+        token_mint TEXT,
+        transaction_type TEXT, -- 'buy' or 'sell'
+        token_amount REAL,
+        sol_amount REAL,
+        token_price REAL,
+        timestamp BIGINT,
+        created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000
+      )
+    `);
+    
+    // Create index for faster pattern queries
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_kol_transactions_kol_token 
+      ON kol_transactions(kol_address, token_mint, timestamp DESC)
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_kol_transactions_token_timestamp 
+      ON kol_transactions(token_mint, timestamp DESC)
+    `);
+    
     // Verify tables were created
     const tablesResult = await pool.query(`
       SELECT table_name 
