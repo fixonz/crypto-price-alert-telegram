@@ -1,6 +1,6 @@
 const axios = require('axios');
 const { KOL_ADDRESSES } = require('../config/kol');
-const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken, saveKOLTransaction, getKOLTransactionHistory, calculateHoldTime, calculateRealizedPnL, analyzeTokenPattern, saveTokenPerformance, updateKOLBehaviorPattern, detectKOLDeviation } = require('../utils/storage');
+const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, updateKOLTokenBalance, hasAlertedOnTransaction, markTransactionAsAlerted, getKOLCountForToken, getKOLsForToken, saveKOLTransaction, getKOLTransactionHistory, calculateHoldTime, calculateRealizedPnL, analyzeTokenPattern, saveTokenPerformance, updateKOLBehaviorPattern, detectKOLDeviation, updateKOLActivityPattern } = require('../utils/storage');
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
@@ -564,6 +564,9 @@ async function checkKOLTransactions(bot) {
                 tokenPrice,
                 txTimestampUnix
               );
+              
+              // Track activity pattern (hourly activity)
+              await updateKOLActivityPattern(kolAddress, txTimestampUnix);
             } catch (error) {
               console.log(`  ⚠️ Could not save transaction for pattern analysis:`, error.message);
             }

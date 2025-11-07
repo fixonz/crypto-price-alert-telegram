@@ -201,6 +201,81 @@ async function initDatabase() {
       )
     `);
     
+    // Create kol_performance_snapshots table for tracking KOL performance over time periods
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_performance_snapshots (
+        id SERIAL PRIMARY KEY,
+        kol_address TEXT NOT NULL,
+        snapshot_date BIGINT NOT NULL,
+        period_type TEXT NOT NULL, -- '24h', '48h', '7d'
+        total_pnl REAL DEFAULT 0,
+        total_pnl_percentage REAL DEFAULT 0,
+        total_buys INTEGER DEFAULT 0,
+        total_sells INTEGER DEFAULT 0,
+        total_volume_sol REAL DEFAULT 0,
+        unique_tokens_traded INTEGER DEFAULT 0,
+        win_rate REAL DEFAULT 0,
+        avg_hold_time REAL,
+        profitable_tokens INTEGER DEFAULT 0,
+        losing_tokens INTEGER DEFAULT 0,
+        largest_win REAL DEFAULT 0,
+        largest_loss REAL DEFAULT 0,
+        performance_data TEXT, -- JSON with detailed metrics
+        created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000,
+        UNIQUE(kol_address, snapshot_date, period_type)
+      )
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_kol_performance_kol_period 
+      ON kol_performance_snapshots(kol_address, period_type, snapshot_date DESC)
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_kol_performance_pnl 
+      ON kol_performance_snapshots(period_type, snapshot_date DESC, total_pnl DESC)
+    `);
+    
+    // Create kol_activity_patterns table to track when KOLs are most active
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_activity_patterns (
+        kol_address TEXT NOT NULL,
+        hour_utc INTEGER NOT NULL, -- 0-23
+        transaction_count INTEGER DEFAULT 0,
+        total_volume_sol REAL DEFAULT 0,
+        last_updated BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000,
+        PRIMARY KEY (kol_address, hour_utc)
+      )
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_kol_activity_kol_hour 
+      ON kol_activity_patterns(kol_address, hour_utc)
+    `);
+    
+    // Create kol_leaderboard table for storing leaderboard snapshots
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kol_leaderboard (
+        id SERIAL PRIMARY KEY,
+        period_type TEXT NOT NULL, -- '24h', '48h', '7d'
+        snapshot_date BIGINT NOT NULL,
+        kol_address TEXT NOT NULL,
+        rank INTEGER NOT NULL,
+        total_pnl REAL DEFAULT 0,
+        total_pnl_percentage REAL DEFAULT 0,
+        win_rate REAL DEFAULT 0,
+        total_volume_sol REAL DEFAULT 0,
+        unique_tokens_traded INTEGER DEFAULT 0,
+        created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000,
+        UNIQUE(period_type, snapshot_date, kol_address)
+      )
+    `);
+    
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_kol_leaderboard_period_date 
+      ON kol_leaderboard(period_type, snapshot_date DESC, rank)
+    `);
+    
     // Verify tables were created
     const tablesResult = await pool.query(`
       SELECT table_name 

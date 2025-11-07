@@ -1513,6 +1513,395 @@ async function detectKOLDeviation(kolAddress, transactionType, solAmount, tokenM
   return deviations.length > 0 ? deviations : null;
 }
 
+// Calculate KOL performance metrics for a specific time period
+async function calculateKOLPerformance(kolAddress, periodHours) {
+  await ensureDatabaseInitialized();
+  if (!db) return null;
+  
+  try {
+    const { getDatabase } = require('./database');
+    const pool = await getDatabase();
+    if (!pool) throw new Error('Database not initialized');
+    
+    const periodStart = Math.floor((Date.now() - (periodHours * 60 * 60 * 1000)) / 1000);
+    
+    // Get all transactions in the period
+    const result = await pool.query(`
+      SELECT * FROM kol_transactions
+      WHERE kol_address = $1 AND timestamp >= $2
+      ORDER BY timestamp ASC
+    `, [kolAddress, periodStart]);
+    
+    const transactions = result.rows;
+    if (transactions.length === 0) return null;
+    
+    // Group transactions by token
+    const tokenTransactions = {};
+    for (const tx of transactions) {
+      if (!tokenTransactions[tx.token_mint]) {
+        tokenTransactions[tx.token_mint] = [];
+      }
+      tokenTransactions[tx.token_mint].push(tx);
+    }
+    
+    // Calculate metrics
+    let totalPnL = 0;
+    let totalCostBasis = 0;
+    let totalProceeds = 0;
+    let totalBuys = 0;
+    let totalSells = 0;
+    let totalVolumeSOL = 0;
+    let profitableTokens = 0;
+    let losingTokens = 0;
+    let largestWin = 0;
+    let largestLoss = 0;
+    const uniqueTokens = new Set();
+    const holdTimes = [];
+    
+    // Calculate PnL per token using FIFO
+    for (const [tokenMint, txs] of Object.entries(tokenTransactions)) {
+      uniqueTokens.add(tokenMint);
+      
+      const buys = txs.filter(tx => tx.transaction_type === 'buy');
+      const sells = txs.filter(tx => tx.transaction_type === 'sell');
+      totalBuys += buys.length;
+      totalSells += sells.length;
+      
+      // Calculate volume
+      for (const tx of txs) {
+        totalVolumeSOL += parseFloat(tx.sol_amount || 0);
+      }
+      
+      // Calculate PnL for this token using FIFO
+      const tokenPnL = await calculateRealizedPnL(kolAddress, tokenMint);
+      if (tokenPnL.realizedPnL !== 0) {
+        totalPnL += tokenPnL.realizedPnL;
+        totalCostBasis += tokenPnL.totalCostBasis;
+        totalProceeds += tokenPnL.totalProceeds;
+        
+        if (tokenPnL.realizedPnL > 0) {
+          profitableTokens++;
+          if (tokenPnL.realizedPnL > largestWin) {
+            largestWin = tokenPnL.realizedPnL;
+          }
+        } else {
+          losingTokens++;
+          if (tokenPnL.realizedPnL < largestLoss) {
+            largestLoss = tokenPnL.realizedPnL;
+          }
+        }
+      }
+      
+      // Calculate hold times
+      const holdTime = await calculateHoldTime(kolAddress, tokenMint);
+      if (holdTime !== null && holdTime > 0) {
+        holdTimes.push(holdTime);
+      }
+    }
+    
+    const totalPnLPercentage = totalCostBasis > 0 ? ((totalPnL / totalCostBasis) * 100) : 0;
+    const winRate = (profitableTokens + losingTokens) > 0 
+      ? (profitableTokens / (profitableTokens + losingTokens)) * 100 
+      : 0;
+    const avgHoldTime = holdTimes.length > 0 
+      ? holdTimes.reduce((a, b) => a + b, 0) / holdTimes.length 
+      : null;
+    
+    return {
+      kolAddress,
+      periodHours,
+      totalPnL,
+      totalPnLPercentage,
+      totalBuys,
+      totalSells,
+      totalVolumeSOL,
+      uniqueTokensTraded: uniqueTokens.size,
+      winRate,
+      avgHoldTime,
+      profitableTokens,
+      losingTokens,
+      largestWin,
+      largestLoss,
+      transactionCount: transactions.length
+    };
+  } catch (error) {
+    console.error('Error calculating KOL performance:', error.message);
+    return null;
+  }
+}
+
+// Save KOL performance snapshot
+async function saveKOLPerformanceSnapshot(kolAddress, periodType, performanceData) {
+  await ensureDatabaseInitialized();
+  if (!db) return;
+  
+  try {
+    const { getDatabase } = require('./database');
+    const pool = await getDatabase();
+    if (!pool) throw new Error('Database not initialized');
+    
+    const snapshotDate = Math.floor(Date.now() / (24 * 60 * 60 * 1000)) * (24 * 60 * 60 * 1000); // Start of day
+    
+    await pool.query(`
+      INSERT INTO kol_performance_snapshots 
+      (kol_address, snapshot_date, period_type, total_pnl, total_pnl_percentage, total_buys, total_sells, 
+       total_volume_sol, unique_tokens_traded, win_rate, avg_hold_time, profitable_tokens, losing_tokens, 
+       largest_win, largest_loss, performance_data)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      ON CONFLICT(kol_address, snapshot_date, period_type) DO UPDATE SET
+        total_pnl = EXCLUDED.total_pnl,
+        total_pnl_percentage = EXCLUDED.total_pnl_percentage,
+        total_buys = EXCLUDED.total_buys,
+        total_sells = EXCLUDED.total_sells,
+        total_volume_sol = EXCLUDED.total_volume_sol,
+        unique_tokens_traded = EXCLUDED.unique_tokens_traded,
+        win_rate = EXCLUDED.win_rate,
+        avg_hold_time = EXCLUDED.avg_hold_time,
+        profitable_tokens = EXCLUDED.profitable_tokens,
+        losing_tokens = EXCLUDED.losing_tokens,
+        largest_win = EXCLUDED.largest_win,
+        largest_loss = EXCLUDED.largest_loss,
+        performance_data = EXCLUDED.performance_data
+    `, [
+      kolAddress,
+      snapshotDate,
+      periodType,
+      performanceData.totalPnL || 0,
+      performanceData.totalPnLPercentage || 0,
+      performanceData.totalBuys || 0,
+      performanceData.totalSells || 0,
+      performanceData.totalVolumeSOL || 0,
+      performanceData.uniqueTokensTraded || 0,
+      performanceData.winRate || 0,
+      performanceData.avgHoldTime || null,
+      performanceData.profitableTokens || 0,
+      performanceData.losingTokens || 0,
+      performanceData.largestWin || 0,
+      performanceData.largestLoss || 0,
+      JSON.stringify(performanceData)
+    ]);
+  } catch (error) {
+    console.error('Error saving KOL performance snapshot:', error.message);
+  }
+}
+
+// Update KOL activity pattern (track hourly activity)
+async function updateKOLActivityPattern(kolAddress, timestamp) {
+  await ensureDatabaseInitialized();
+  if (!db) return;
+  
+  try {
+    const { getDatabase } = require('./database');
+    const pool = await getDatabase();
+    if (!pool) throw new Error('Database not initialized');
+    
+    const date = new Date(timestamp * 1000);
+    const hourUTC = date.getUTCHours();
+    
+    // Get transaction to calculate volume
+    const txResult = await pool.query(`
+      SELECT sol_amount FROM kol_transactions
+      WHERE kol_address = $1 AND timestamp = $2
+      LIMIT 1
+    `, [kolAddress, timestamp]);
+    
+    const volume = txResult.rows.length > 0 ? parseFloat(txResult.rows[0].sol_amount || 0) : 0;
+    
+    await pool.query(`
+      INSERT INTO kol_activity_patterns (kol_address, hour_utc, transaction_count, total_volume_sol, last_updated)
+      VALUES ($1, $2, 1, $3, $4)
+      ON CONFLICT(kol_address, hour_utc) DO UPDATE SET
+        transaction_count = kol_activity_patterns.transaction_count + 1,
+        total_volume_sol = kol_activity_patterns.total_volume_sol + EXCLUDED.total_volume_sol,
+        last_updated = EXCLUDED.last_updated
+    `, [kolAddress, hourUTC, volume, Date.now()]);
+  } catch (error) {
+    console.error('Error updating KOL activity pattern:', error.message);
+  }
+}
+
+// Get KOL activity pattern (most active hours)
+async function getKOLActivityPattern(kolAddress) {
+  await ensureDatabaseInitialized();
+  if (!db) return null;
+  
+  try {
+    const { getDatabase } = require('./database');
+    const pool = await getDatabase();
+    if (!pool) throw new Error('Database not initialized');
+    
+    const result = await pool.query(`
+      SELECT hour_utc, transaction_count, total_volume_sol
+      FROM kol_activity_patterns
+      WHERE kol_address = $1
+      ORDER BY transaction_count DESC
+      LIMIT 24
+    `, [kolAddress]);
+    
+    return result.rows.map(row => ({
+      hour: row.hour_utc,
+      transactionCount: row.transaction_count,
+      volumeSOL: parseFloat(row.total_volume_sol || 0)
+    }));
+  } catch (error) {
+    console.error('Error getting KOL activity pattern:', error.message);
+    return null;
+  }
+}
+
+// Generate leaderboard for a specific period
+async function generateLeaderboard(periodType, limit = 50) {
+  await ensureDatabaseInitialized();
+  if (!db) return [];
+  
+  try {
+    const { getDatabase } = require('./database');
+    const pool = await getDatabase();
+    if (!pool) throw new Error('Database not initialized');
+    
+    const periodHours = periodType === '24h' ? 24 : periodType === '48h' ? 48 : 168; // 7d = 168h
+    const periodStart = Math.floor((Date.now() - (periodHours * 60 * 60 * 1000)) / 1000);
+    
+    // Get all KOLs with transactions in this period
+    const kolResult = await pool.query(`
+      SELECT DISTINCT kol_address FROM kol_transactions
+      WHERE timestamp >= $1
+    `, [periodStart]);
+    
+    const kols = kolResult.rows.map(r => r.kol_address);
+    const performances = [];
+    
+    // Calculate performance for each KOL
+    for (const kolAddress of kols) {
+      const performance = await calculateKOLPerformance(kolAddress, periodHours);
+      if (performance && performance.transactionCount > 0) {
+        performances.push(performance);
+      }
+    }
+    
+    // Sort by total PnL descending
+    performances.sort((a, b) => b.totalPnL - a.totalPnL);
+    
+    // Take top N
+    const leaderboard = performances.slice(0, limit).map((perf, index) => ({
+      rank: index + 1,
+      ...perf
+    }));
+    
+    // Save leaderboard snapshot
+    const snapshotDate = Math.floor(Date.now() / (24 * 60 * 60 * 1000)) * (24 * 60 * 60 * 1000);
+    for (const entry of leaderboard) {
+      await pool.query(`
+        INSERT INTO kol_leaderboard 
+        (period_type, snapshot_date, kol_address, rank, total_pnl, total_pnl_percentage, 
+         win_rate, total_volume_sol, unique_tokens_traded)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT(period_type, snapshot_date, kol_address) DO UPDATE SET
+          rank = EXCLUDED.rank,
+          total_pnl = EXCLUDED.total_pnl,
+          total_pnl_percentage = EXCLUDED.total_pnl_percentage,
+          win_rate = EXCLUDED.win_rate,
+          total_volume_sol = EXCLUDED.total_volume_sol,
+          unique_tokens_traded = EXCLUDED.unique_tokens_traded
+      `, [
+        periodType,
+        snapshotDate,
+        entry.kolAddress,
+        entry.rank,
+        entry.totalPnL,
+        entry.totalPnLPercentage,
+        entry.winRate,
+        entry.totalVolumeSOL,
+        entry.uniqueTokensTraded
+      ]);
+    }
+    
+    return leaderboard;
+  } catch (error) {
+    console.error('Error generating leaderboard:', error.message);
+    return [];
+  }
+}
+
+// Get leaderboard from saved snapshots
+async function getLeaderboard(periodType, limit = 50) {
+  await ensureDatabaseInitialized();
+  if (!db) return [];
+  
+  try {
+    const { getDatabase } = require('./database');
+    const pool = await getDatabase();
+    if (!pool) throw new Error('Database not initialized');
+    
+    const result = await pool.query(`
+      SELECT kol_address, rank, total_pnl, total_pnl_percentage, win_rate, 
+             total_volume_sol, unique_tokens_traded
+      FROM kol_leaderboard
+      WHERE period_type = $1
+      ORDER BY snapshot_date DESC, rank ASC
+      LIMIT $2
+    `, [periodType, limit]);
+    
+    return result.rows.map(row => ({
+      kolAddress: row.kol_address,
+      rank: row.rank,
+      totalPnL: parseFloat(row.total_pnl || 0),
+      totalPnLPercentage: parseFloat(row.total_pnl_percentage || 0),
+      winRate: parseFloat(row.win_rate || 0),
+      totalVolumeSOL: parseFloat(row.total_volume_sol || 0),
+      uniqueTokensTraded: row.unique_tokens_traded || 0
+    }));
+  } catch (error) {
+    console.error('Error getting leaderboard:', error.message);
+    return [];
+  }
+}
+
+// Run performance analysis for all tracked KOLs
+async function runKOLPerformanceAnalysis() {
+  await ensureDatabaseInitialized();
+  if (!db) return;
+  
+  try {
+    const { getDatabase } = require('./database');
+    const pool = await getDatabase();
+    if (!pool) throw new Error('Database not initialized');
+    
+    // Get all unique KOL addresses from transactions
+    const kolResult = await pool.query(`
+      SELECT DISTINCT kol_address FROM kol_transactions
+    `);
+    
+    const kols = kolResult.rows.map(r => r.kol_address);
+    console.log(`📊 Analyzing performance for ${kols.length} KOL(s)...`);
+    
+    // Analyze for each period
+    const periods = [
+      { type: '24h', hours: 24 },
+      { type: '48h', hours: 48 },
+      { type: '7d', hours: 168 }
+    ];
+    
+    for (const period of periods) {
+      console.log(`  📈 Calculating ${period.type} performance...`);
+      
+      for (const kolAddress of kols) {
+        const performance = await calculateKOLPerformance(kolAddress, period.hours);
+        if (performance && performance.transactionCount > 0) {
+          await saveKOLPerformanceSnapshot(kolAddress, period.type, performance);
+        }
+      }
+      
+      // Generate leaderboard for this period
+      await generateLeaderboard(period.type, 100);
+    }
+    
+    console.log(`✅ Performance analysis complete`);
+  } catch (error) {
+    console.error('Error running KOL performance analysis:', error.message);
+  }
+}
+
 module.exports = {
   loadUsers,
   saveUsers,
@@ -1545,6 +1934,13 @@ module.exports = {
   runLongTermAnalysis,
   updateKOLBehaviorPattern,
   detectKOLDeviation,
-  getKOLBehaviorPattern
+  getKOLBehaviorPattern,
+  calculateKOLPerformance,
+  saveKOLPerformanceSnapshot,
+  updateKOLActivityPattern,
+  getKOLActivityPattern,
+  generateLeaderboard,
+  getLeaderboard,
+  runKOLPerformanceAnalysis
 };
 

@@ -1,9 +1,10 @@
 const { TOKENS, VALID_INTERVALS } = require('../config/tokens');
-const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUserCount, getActiveUserCount, setTempFlag, getTempFlag, clearTempFlag, getWinningTokens } = require('../utils/storage');
+const { getUserPreferences, updateUserPreferences, loadUsers, saveUsers, getUserCount, getActiveUserCount, setTempFlag, getTempFlag, clearTempFlag, getWinningTokens, getLeaderboard, calculateKOLPerformance } = require('../utils/storage');
 const { getSolanaTokenInfo, getTokenPrice } = require('../utils/api');
 const { scheduleUserUpdates } = require('../services/scheduler');
 const { notifyAdminNewUser } = require('./admin');
 const { KOL_ADDRESSES, KOL_NAME_TO_ADDRESS } = require('../config/kol');
+const { syncTopKOLsFromLeaderboard, analyzeTopKOLPatterns } = require('../services/kolscanLeaderboard');
 
 // Start command - Beautiful menu with status and buttons
 async function handleStart(bot, msg) {
@@ -850,6 +851,102 @@ async function handleUntrackKOL(bot, msg) {
   }
 }
 
+// Handle leaderboard sync command
+async function handleLeaderboardSync(bot, msg) {
+  const chatId = msg.chat.id;
+  
+  try {
+    await bot.sendMessage(chatId, '📊 Syncing top KOLs from kolscan.io leaderboard...', {
+      parse_mode: 'HTML'
+    });
+    
+    const result = await syncTopKOLsFromLeaderboard('daily', 50, chatId);
+    
+    if (result.error) {
+      await bot.sendMessage(chatId, `❌ Error syncing leaderboard: ${result.error}`, {
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+    
+    let message = `✅ <b>Leaderboard Sync Complete</b>\n\n`;
+    message += `📊 Top ${result.total} KOL(s) fetched\n`;
+    message += `➕ ${result.added} new KOL(s) added to tracking\n\n`;
+    
+    if (result.addedKOLs && result.addedKOLs.length > 0) {
+      message += `<b>Newly Added KOLs:</b>\n`;
+      result.addedKOLs.forEach(kol => {
+        const pnlSign = kol.pnlSOL >= 0 ? '+' : '';
+        message += `• ${kol.name} (#${kol.rank}) - ${pnlSign}${kol.pnlSOL.toFixed(2)} SOL\n`;
+      });
+    }
+    
+    if (result.leaderboard && result.leaderboard.length > 0) {
+      message += `\n<b>Top 10 Performers:</b>\n`;
+      result.leaderboard.slice(0, 10).forEach(entry => {
+        const pnlSign = entry.pnlSOL >= 0 ? '+' : '';
+        const name = entry.name || KOL_ADDRESSES[entry.address]?.[0] || entry.shortAddress || 'Unknown';
+        message += `${entry.rank}. ${name} - ${pnlSign}${entry.pnlSOL.toFixed(2)} SOL\n`;
+      });
+    }
+    
+    await bot.sendMessage(chatId, message, {
+      parse_mode: 'HTML'
+    });
+  } catch (error) {
+    console.error('Error syncing leaderboard:', error);
+    await bot.sendMessage(chatId, '❌ An error occurred while syncing the leaderboard.');
+  }
+}
+
+// Handle leaderboard view command
+async function handleLeaderboard(bot, msg) {
+  const chatId = msg.chat.id;
+  const args = msg.text.split(' ').slice(1).join(' ').trim();
+  const period = args.toLowerCase() === 'weekly' ? '7d' : args.toLowerCase() === 'monthly' ? '30d' : '24h';
+  
+  try {
+    await bot.sendMessage(chatId, `📊 Fetching ${period === '24h' ? '24h' : period === '7d' ? '7d' : '30d'} leaderboard...`, {
+      parse_mode: 'HTML'
+    });
+    
+    const leaderboard = await getLeaderboard(period, 20);
+    
+    if (leaderboard.length === 0) {
+      await bot.sendMessage(chatId, `⚠️ No leaderboard data available for ${period}. Try syncing first with /syncleaderboard`, {
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+    
+    let message = `🏆 <b>KOL Leaderboard (${period === '24h' ? '24h' : period === '7d' ? '7d' : '30d'})</b>\n\n`;
+    
+    leaderboard.slice(0, 20).forEach(entry => {
+      const medal = entry.rank === 1 ? '🥇' : entry.rank === 2 ? '🥈' : entry.rank === 3 ? '🥉' : `${entry.rank}.`;
+      const pnlSign = entry.totalPnL >= 0 ? '+' : '';
+      const pnlEmoji = entry.totalPnL >= 0 ? '🟢' : '🔴';
+      const name = KOL_ADDRESSES[entry.kolAddress]?.[0] || entry.kolAddress.substring(0, 8) + '...';
+      
+      message += `${medal} <b>${name}</b>\n`;
+      message += `   ${pnlEmoji} ${pnlSign}${entry.totalPnL.toFixed(2)} SOL (${pnlSign}${entry.totalPnLPercentage.toFixed(1)}%)\n`;
+      message += `   📊 ${entry.totalVolumeSOL.toFixed(2)} SOL volume | ${entry.uniqueTokensTraded} tokens\n`;
+      if (entry.winRate > 0) {
+        message += `   ✅ ${entry.winRate.toFixed(1)}% win rate\n`;
+      }
+      message += `\n`;
+    });
+    
+    message += `\n💡 Use /syncleaderboard to update from kolscan.io`;
+    
+    await bot.sendMessage(chatId, message, {
+      parse_mode: 'HTML'
+    });
+  } catch (error) {
+    console.error('Error fetching leaderboard:', error);
+    await bot.sendMessage(chatId, '❌ An error occurred while fetching the leaderboard.');
+  }
+}
+
 module.exports = {
   handleStart,
   handleSelect,
@@ -867,6 +964,8 @@ module.exports = {
   handleKOL,
   handleTrackKOL,
   handleUntrackKOL,
+  handleLeaderboardSync,
+  handleLeaderboard,
   sendKOLListPage
 };
 

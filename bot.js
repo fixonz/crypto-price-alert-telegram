@@ -22,7 +22,9 @@ const {
   handleSOL,
   handleKOL,
   handleTrackKOL,
-  handleUntrackKOL
+  handleUntrackKOL,
+  handleLeaderboardSync,
+  handleLeaderboard
 } = require('./handlers/commands');
 
 const { handleCallbackQuery } = require('./handlers/callbacks');
@@ -64,6 +66,8 @@ bot.onText(/\/sol$/i, (msg) => handleSOL(bot, msg));
 bot.onText(/\/kol/i, (msg) => handleKOL(bot, msg));
 bot.onText(/\/trackkol/i, (msg) => handleTrackKOL(bot, msg));
 bot.onText(/\/untrackkol/i, (msg) => handleUntrackKOL(bot, msg));
+bot.onText(/\/syncleaderboard/i, (msg) => handleLeaderboardSync(bot, msg));
+bot.onText(/\/leaderboard/i, (msg) => handleLeaderboard(bot, msg));
 
 // Handle callback queries (inline keyboard buttons)
 bot.on('callback_query', (query) => handleCallbackQuery(bot, query));
@@ -243,6 +247,29 @@ cron.schedule('0 2 * * *', async () => {
     }
   } catch (error) {
     console.error('Error in daily analysis:', error.message);
+  }
+});
+
+// Schedule KOL leaderboard syncing (runs every 6 hours)
+const { syncTopKOLsFromLeaderboard } = require('./services/kolscanLeaderboard');
+cron.schedule('0 */6 * * *', async () => {
+  console.log('📊 Syncing top KOLs from kolscan.io leaderboard...');
+  try {
+    const result = await syncTopKOLsFromLeaderboard('daily', 50);
+    console.log(`✅ Leaderboard sync complete: ${result.added} new KOL(s) added`);
+  } catch (error) {
+    console.error('Error syncing leaderboard:', error.message);
+  }
+});
+
+// Schedule KOL performance analysis (runs every 4 hours)
+const { runKOLPerformanceAnalysis } = require('./utils/storage');
+cron.schedule('0 */4 * * *', async () => {
+  console.log('📊 Running KOL performance analysis (24h, 48h, 7d)...');
+  try {
+    await runKOLPerformanceAnalysis();
+  } catch (error) {
+    console.error('Error in KOL performance analysis:', error.message);
   }
 });
 
