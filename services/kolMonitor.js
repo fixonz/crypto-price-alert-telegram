@@ -5,6 +5,166 @@ const { loadUsers, loadKOLSignatures, saveKOLSignature, getKOLTokenBalance, upda
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || '2238f591-e4cf-4e28-919a-6e7164a9d0ad';
 const HELIUS_BASE_URL = 'https://api-mainnet.helius-rpc.com';
 
+// Queue for buy alerts that need to wait 1 minute before sending
+// Format: { kolAddress, tokenMint, groupData, timestamp, message, tokenInfo }
+const pendingBuyAlerts = new Map();
+
+// Helper function to format token amounts
+function formatTokenAmount(amount) {
+  if (amount >= 1e9) return `${(amount / 1e9).toFixed(2)}b`;
+  if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}m`;
+  if (amount >= 1e3) return `${(amount / 1e3).toFixed(2)}k`;
+  return amount.toFixed(2);
+}
+
+// Check pending buy alerts and send them if 1 minute has passed
+// If a sell happened within that minute, include it in the same alert
+async function processPendingBuyAlerts(bot) {
+  const now = Date.now();
+  const oneMinute = 60 * 1000;
+  
+  for (const [key, alert] of pendingBuyAlerts.entries()) {
+    const timeElapsed = now - alert.timestamp;
+    
+    // If 1 minute has passed, check for sells and send combined alert
+    if (timeElapsed >= oneMinute) {
+      try {
+        // Check if a sell happened for this KOL/token within the last minute
+        const recentSells = await getKOLTransactionHistory(alert.kolAddress, alert.tokenMint, 10);
+        const sellsAfterBuy = recentSells.filter(tx => 
+          tx.transaction_type === 'sell' && 
+          tx.timestamp > alert.timestamp / 1000 && // Sell happened after buy
+          tx.timestamp <= (alert.timestamp + oneMinute) / 1000 // Within 1 minute
+        );
+        
+        let finalMessage = alert.message;
+        
+        // If sells happened, modify the message to include sell info
+        if (sellsAfterBuy.length > 0) {
+          console.log(`  🔄 Buy + ${sellsAfterBuy.length} sell(s) detected within 1 minute - sending combined alert for ${alert.tokenMint.substring(0, 8)}...`);
+          
+          // Calculate total sell amounts
+          const totalSellTokens = sellsAfterBuy.reduce((sum, tx) => sum + parseFloat(tx.token_amount || 0), 0);
+          const totalSellSol = sellsAfterBuy.reduce((sum, tx) => sum + parseFloat(tx.sol_amount || 0), 0);
+          
+          // Modify message to show it's a mixed buy+sell
+          // Change emoji from 🟢 to 🔄
+          finalMessage = finalMessage.replace(/🟢/g, '🔄');
+          
+          // Add sell section before HOLDS
+          const holdsIndex = finalMessage.indexOf('HOLDS:');
+          if (holdsIndex !== -1) {
+            const sellSection = `\n<b>SELLS (within 1 min):</b>\n` +
+              `${formatTokenAmount(totalSellTokens)} tokens\n` +
+              `${totalSellSol.toFixed(4)} SOL\n`;
+            finalMessage = finalMessage.slice(0, holdsIndex) + sellSection + finalMessage.slice(holdsIndex);
+          }
+        } else {
+          console.log(`  ✅ Buy passed 1-minute test (no sell detected) - sending alert for ${alert.tokenMint.substring(0, 8)}...`);
+        }
+        
+        // Send alert to all users
+        const users = await loadUsers();
+        for (const [chatId, userPrefs] of Object.entries(users)) {
+          if (userPrefs.subscribed && userPrefs.kolAlerts !== false) {
+            try {
+              if (alert.tokenInfo && alert.tokenInfo.imageUrl) {
+                await bot.sendPhoto(chatId, alert.tokenInfo.imageUrl, {
+                  caption: finalMessage,
+                  parse_mode: 'HTML',
+                  disable_web_page_preview: true
+                });
+              } else {
+                await bot.sendMessage(chatId, finalMessage, {
+                  parse_mode: 'HTML',
+                  disable_web_page_preview: true
+                });
+              }
+              
+              // Mark sell transactions as alerted if any
+              if (sellsAfterBuy.length > 0) {
+                for (const sellTx of sellsAfterBuy) {
+                  await markTransactionAsAlerted(sellTx.signature, alert.kolAddress, alert.tokenMint);
+                }
+              }
+            } catch (error) {
+              if (error.response?.statusCode === 403 || error.response?.statusCode === 400) {
+                const { loadUsers, saveUsers } = require('../utils/storage');
+                const users = await loadUsers();
+                delete users[chatId];
+                await saveUsers(users);
+              }
+            }
+          }
+        }
+        
+        // Remove from queue
+        pendingBuyAlerts.delete(key);
+      } catch (error) {
+        console.log(`  ⚠️ Error processing pending buy alert:`, error.message);
+        // Remove from queue on error to prevent infinite retries
+        pendingBuyAlerts.delete(key);
+      }
+    }
+  }
+}
+
+// Fetch transaction details from Solscan API to get actual swap amounts
+// This is a fallback when Helius doesn't provide accurate SOL amounts
+async function fetchTransactionFromSolscan(signature) {
+  try {
+    const response = await axios.get(
+      `https://api.solscan.io/transaction?tx=${signature}`,
+      {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0'
+        },
+        timeout: 10000
+      }
+    );
+    
+    if (response.data && response.data.success !== false) {
+      // Parse Solscan transaction format
+      const tx = response.data;
+      
+      // Look for SOL transfer amounts in the transaction
+      // Solscan format might have balanceChanges or transfers
+      if (tx.balanceChanges) {
+        for (const change of tx.balanceChanges) {
+          if (change.change && change.change > 0) {
+            const solAmount = Math.abs(parseFloat(change.change)) / 1e9;
+            if (solAmount > 0.01) {
+              return solAmount;
+            }
+          }
+        }
+      }
+      
+      // Check transfers array
+      if (tx.transfers && Array.isArray(tx.transfers)) {
+        let totalSolReceived = 0;
+        for (const transfer of tx.transfers) {
+          if (transfer.symbol === 'SOL' && transfer.dst && transfer.amount) {
+            const amount = parseFloat(transfer.amount);
+            if (amount > 0.01) {
+              totalSolReceived += amount;
+            }
+          }
+        }
+        if (totalSolReceived > 0.01) {
+          return totalSolReceived;
+        }
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.log(`    ⚠️ Could not fetch from Solscan for ${signature}:`, error.message);
+    return null;
+  }
+}
+
 // Get recent transactions for a KOL address using Helius API
 async function getKOLTransactions(kolAddress, limit = 10) {
   try {
@@ -46,7 +206,7 @@ async function getKOLTransactions(kolAddress, limit = 10) {
 
 // Parse transaction to extract token swap information
 // Handles Helius API format with tokenTransfers and nativeTransfers
-function parseSwapTransaction(tx, kolAddress) {
+async function parseSwapTransaction(tx, kolAddress) {
   try {
     if (!tx) {
       return null;
@@ -64,16 +224,77 @@ function parseSwapTransaction(tx, kolAddress) {
     const tokenTransfers = tx.tokenTransfers || [];
     const nativeTransfers = tx.nativeTransfers || [];
     const events = tx.events || []; // Check for events that might contain swap amounts
+    const innerInstructions = tx.innerInstructions || tx.transaction?.meta?.innerInstructions || [];
     const timestamp = tx.timestamp ? new Date(tx.timestamp * 1000) : new Date();
     const description = tx.description || '';
     
     // Try to extract SOL amount from description (Helius sometimes includes this)
     let solAmountFromDescription = null;
     if (description) {
-      // Look for patterns like "for X SOL" or "X SOL" in description
-      const solMatch = description.match(/(\d+\.?\d*)\s*SOL/i);
-      if (solMatch) {
-        solAmountFromDescription = parseFloat(solMatch[1]);
+      // Look for patterns like "for X SOL" or "X SOL" or "received X SOL" in description
+      // Try multiple patterns
+      const patterns = [
+        /(\d+\.?\d*)\s*SOL/i, // Simple "X SOL"
+        /for\s+(\d+\.?\d*)\s*SOL/i, // "for X SOL"
+        /received\s+(\d+\.?\d*)\s*SOL/i, // "received X SOL"
+        /(\d+\.?\d*)\s*SOL\s+for/i, // "X SOL for"
+        /swap.*?(\d+\.?\d*)\s*SOL/i // "swap ... X SOL"
+      ];
+      
+      for (const pattern of patterns) {
+        const match = description.match(pattern);
+        if (match) {
+          const amount = parseFloat(match[1]);
+          // Only use if it's a reasonable amount (> 0.01 SOL, not fees)
+          if (amount > 0.01) {
+            solAmountFromDescription = amount;
+            break;
+          }
+        }
+      }
+    }
+    
+    // Check events for Pump.fun swap data
+    let solAmountFromEvents = null;
+    for (const event of events) {
+      // Pump.fun events might have solAmount field
+      if (event.solAmount || event.sol_amount) {
+        const amount = parseFloat(event.solAmount || event.sol_amount || 0) / 1e9; // Convert lamports to SOL
+        if (amount > 0.01 && (!solAmountFromEvents || amount > solAmountFromEvents)) {
+          solAmountFromEvents = amount;
+        }
+      }
+      // Check event data/attributes
+      if (event.data && typeof event.data === 'object') {
+        if (event.data.solAmount) {
+          const amount = parseFloat(event.data.solAmount) / 1e9;
+          if (amount > 0.01 && (!solAmountFromEvents || amount > solAmountFromEvents)) {
+            solAmountFromEvents = amount;
+          }
+        }
+        if (event.data.sol_amount) {
+          const amount = parseFloat(event.data.sol_amount) / 1e9;
+          if (amount > 0.01 && (!solAmountFromEvents || amount > solAmountFromEvents)) {
+            solAmountFromEvents = amount;
+          }
+        }
+      }
+    }
+    
+    // Check inner instructions for swap amounts
+    let solAmountFromInnerInstructions = null;
+    for (const inner of innerInstructions) {
+      if (inner.instructions && Array.isArray(inner.instructions)) {
+        for (const instruction of inner.instructions) {
+          // Look for transfer instructions with large amounts
+          if (instruction.parsed && instruction.parsed.type === 'transfer') {
+            const amount = parseFloat(instruction.parsed.info?.lamports || 0) / 1e9;
+            const to = (instruction.parsed.info?.destination || '').toLowerCase();
+            if (to === kolAddressLower && amount > 0.01 && (!solAmountFromInnerInstructions || amount > solAmountFromInnerInstructions)) {
+              solAmountFromInnerInstructions = amount;
+            }
+          }
+        }
       }
     }
     
@@ -182,9 +403,13 @@ function parseSwapTransaction(tx, kolAddress) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
-        // For sells, prioritize: description amount > totalSignificantSolReceived > largestSolReceived > solReceived > solChange
-        // Description amount is usually most accurate for Pump.fun swaps
-        if (solAmountFromDescription && solAmountFromDescription > 0.1) {
+        // For sells, prioritize: events > inner instructions > description > totalSignificantSolReceived > largestSolReceived > solReceived > solChange
+        // Events and inner instructions are usually most accurate for Pump.fun swaps
+        if (solAmountFromEvents && solAmountFromEvents > 0.01) {
+          solAmount = solAmountFromEvents;
+        } else if (solAmountFromInnerInstructions && solAmountFromInnerInstructions > 0.01) {
+          solAmount = solAmountFromInnerInstructions;
+        } else if (solAmountFromDescription && solAmountFromDescription > 0.1) {
           solAmount = solAmountFromDescription;
         } else if (totalSignificantSolReceived > 0.1) {
           solAmount = totalSignificantSolReceived;
@@ -195,7 +420,23 @@ function parseSwapTransaction(tx, kolAddress) {
         } else {
           solAmount = solChange; // Fallback to net change
         }
-        console.log(`    💰 Sell SOL detection: desc=${solAmountFromDescription || 'N/A'}, significant=${totalSignificantSolReceived.toFixed(4)}, largest=${largestSolReceived.toFixed(4)}, total=${solReceived.toFixed(4)}, net=${solChange.toFixed(4)}, using=${solAmount.toFixed(4)}`);
+        
+        // Sanity check: if sell amount seems suspiciously low for the token amount, try Solscan
+        // If we're selling a significant amount of tokens (> 1M) but SOL received is < 0.1, something is wrong
+        if (amount > 1000000 && solAmount < 0.1 && signature) {
+          console.log(`    ⚠️ Suspiciously low SOL amount for sell: ${solAmount.toFixed(4)} SOL for ${amount.toFixed(0)} tokens. Fetching from Solscan...`);
+          try {
+            const solscanAmount = await fetchTransactionFromSolscan(signature);
+            if (solscanAmount && solscanAmount > solAmount) {
+              console.log(`    ✅ Solscan found better amount: ${solscanAmount.toFixed(4)} SOL (was ${solAmount.toFixed(4)})`);
+              solAmount = solscanAmount;
+            }
+          } catch (error) {
+            console.log(`    ⚠️ Solscan fetch failed:`, error.message);
+          }
+        }
+        
+        console.log(`    💰 Sell SOL detection: events=${solAmountFromEvents || 'N/A'}, inner=${solAmountFromInnerInstructions || 'N/A'}, desc=${solAmountFromDescription || 'N/A'}, significant=${totalSignificantSolReceived.toFixed(4)}, largest=${largestSolReceived.toFixed(4)}, total=${solReceived.toFixed(4)}, net=${solChange.toFixed(4)}, using=${solAmount.toFixed(4)}`);
       }
       // Edge case: Both SOL and tokens going out - might be a sell with fees or wrapped SOL
       // If tokens are going out significantly, it's likely a sell (SOL might be wrapped differently)
@@ -410,6 +651,9 @@ function groupTransactions(parsedTransactions, groupTimeWindowMs = 120000) { // 
 // Monitor KOL transactions and send alerts
 async function checkKOLTransactions(bot) {
   try {
+    // Process pending buy alerts first (check if 1 minute has passed)
+    await processPendingBuyAlerts(bot);
+    
     const users = await loadUsers();
     
     // Load last processed signatures from persistent storage
@@ -534,7 +778,7 @@ async function checkKOLTransactions(bot) {
           console.log(`  🔍 Parsing transaction: ${signature.substring(0, 16)}...`);
           
           // Parse transaction
-          const swapInfo = parseSwapTransaction(tx, kolAddress);
+          const swapInfo = await parseSwapTransaction(tx, kolAddress);
           
           if (swapInfo && swapInfo.tokenMint) {
             parsedTransactions.push({ tx, signature, swapInfo });
@@ -587,16 +831,27 @@ async function checkKOLTransactions(bot) {
               isFirstBuy = !currentBalanceRecord || !currentBalanceRecord.first_buy_signature;
             }
             
-            // Get token price (fetch once per group)
+            // Get token price and market cap (fetch once per group)
             if (!tokenPrice) {
               try {
-                const { getSolanaTokenPrice } = require('../utils/api');
+                const { getSolanaTokenPrice, getSolanaTokenInfo } = require('../utils/api');
                 const priceData = await getSolanaTokenPrice(swapInfo.tokenMint);
                 if (priceData && priceData.price) {
                   tokenPrice = parseFloat(priceData.price);
                 }
+                
+                // Get token info for market cap
+                if (!tokenInfo) {
+                  tokenInfo = await getSolanaTokenInfo(swapInfo.tokenMint);
+                  if (tokenInfo && tokenInfo.marketCap) {
+                    marketCap = parseFloat(tokenInfo.marketCap);
+                  } else if (tokenPrice) {
+                    // Calculate market cap from price (Solana tokens have 1B supply)
+                    marketCap = tokenPrice * 1e9;
+                  }
+                }
               } catch (error) {
-                console.log(`  ⚠️ Could not fetch price for token ${swapInfo.tokenMint}:`, error.message);
+                console.log(`  ⚠️ Could not fetch price/market cap for token ${swapInfo.tokenMint}:`, error.message);
               }
             }
             
@@ -611,7 +866,8 @@ async function checkKOLTransactions(bot) {
                 swapInfo.tokenAmount,
                 swapInfo.solAmount,
                 tokenPrice,
-                txTimestampUnix
+                txTimestampUnix,
+                marketCap // Store market cap at buy time
               );
               
               // Track activity pattern (hourly activity)
@@ -710,6 +966,64 @@ async function checkKOLTransactions(bot) {
           let holdTime = null;
           if (groupSwapInfo.type === 'sell') {
             holdTime = await calculateHoldTime(kolAddress, groupSwapInfo.tokenMint);
+          }
+          
+          // Analyze market cap at buy time (detect farming behavior - buying at very low market cap)
+          let marketCapAnalysis = null;
+          if (hasBuys && marketCap) {
+            try {
+              // Get KOL's historical buy market caps to compare
+              const history = await getKOLTransactionHistory(kolAddress, null, 100); // Get all recent transactions
+              const buyHistory = history.filter(tx => tx.transaction_type === 'buy' && tx.market_cap);
+              
+              if (buyHistory.length > 0) {
+                const historicalMarketCaps = buyHistory.map(tx => parseFloat(tx.market_cap || 0)).filter(mc => mc > 0);
+                
+                if (historicalMarketCaps.length > 0) {
+                  const avgMarketCap = historicalMarketCaps.reduce((a, b) => a + b, 0) / historicalMarketCaps.length;
+                  const medianMarketCap = [...historicalMarketCaps].sort((a, b) => a - b)[Math.floor(historicalMarketCaps.length / 2)];
+                  const minMarketCap = Math.min(...historicalMarketCaps);
+                  
+                  // Check if current buy is at unusually low market cap
+                  // Threshold: < 50% of average or < $10k (very early stage)
+                  const isLowMarketCap = marketCap < (avgMarketCap * 0.5) || marketCap < 10000;
+                  const isVeryLowMarketCap = marketCap < 5000; // Ultra-early, likely farming
+                  
+                  // Calculate percentile
+                  const sortedCaps = [...historicalMarketCaps].sort((a, b) => a - b);
+                  const percentile = (sortedCaps.filter(mc => mc <= marketCap).length / sortedCaps.length) * 100;
+                  
+                  marketCapAnalysis = {
+                    currentMarketCap: marketCap,
+                    avgMarketCap: avgMarketCap,
+                    medianMarketCap: medianMarketCap,
+                    minMarketCap: minMarketCap,
+                    percentile: percentile,
+                    isLowMarketCap: isLowMarketCap,
+                    isVeryLowMarketCap: isVeryLowMarketCap,
+                    historicalCount: historicalMarketCaps.length
+                  };
+                } else {
+                  // First buy or no historical data - still check if very low
+                  marketCapAnalysis = {
+                    currentMarketCap: marketCap,
+                    isLowMarketCap: marketCap < 10000,
+                    isVeryLowMarketCap: marketCap < 5000,
+                    historicalCount: 0
+                  };
+                }
+              } else {
+                // First buy for this KOL - check if very low
+                marketCapAnalysis = {
+                  currentMarketCap: marketCap,
+                  isLowMarketCap: marketCap < 10000,
+                  isVeryLowMarketCap: marketCap < 5000,
+                  historicalCount: 0
+                };
+              }
+            } catch (error) {
+              console.log(`  ⚠️ Could not analyze market cap:`, error.message);
+            }
           }
           
           // Analyze instant flips (buy then sell within 1 minute in same group)
@@ -823,6 +1137,27 @@ async function checkKOLTransactions(bot) {
                 type: 'instant_flip',
                 message: `⚡ Instant flip detected: ${instantFlipAnalysis.count} flip${instantFlipAnalysis.count > 1 ? 's' : ''} within ${instantFlipAnalysis.fastestTime.toFixed(1)}s - ${instantFlipAnalysis.fastestTime < 10 ? 'ULTRA-FAST (scalping?)' : 'Quick profit-taking'}`,
                 severity: instantFlipAnalysis.fastestTime < 10 ? 'high' : 'medium'
+              });
+            }
+            
+            // Add low market cap farming deviation if detected
+            if (marketCapAnalysis && marketCapAnalysis.isVeryLowMarketCap && hasBuys) {
+              if (!behaviorDeviations) {
+                behaviorDeviations = [];
+              }
+              behaviorDeviations.push({
+                type: 'low_mcap_farming',
+                message: `🚨 Ultra-low market cap buy (${formatMarketCap(marketCapAnalysis.currentMarketCap)}) - Possible farming copy traders!`,
+                severity: 'high'
+              });
+            } else if (marketCapAnalysis && marketCapAnalysis.isLowMarketCap && hasBuys && marketCapAnalysis.historicalCount > 0) {
+              if (!behaviorDeviations) {
+                behaviorDeviations = [];
+              }
+              behaviorDeviations.push({
+                type: 'low_mcap_buy',
+                message: `⚠️ Low market cap buy (${formatMarketCap(marketCapAnalysis.currentMarketCap)}) - ${marketCapAnalysis.percentile.toFixed(0)}th percentile vs historical`,
+                severity: 'medium'
               });
             }
             
@@ -1120,6 +1455,32 @@ async function checkKOLTransactions(bot) {
             }
           }
           
+          // Market cap analysis (farming detection) - show before behavior deviations
+          if (marketCapAnalysis && hasBuys) {
+            const mcapFormatted = formatMarketCap(marketCapAnalysis.currentMarketCap);
+            
+            if (marketCapAnalysis.isVeryLowMarketCap) {
+              message += `\n🚨 <b>ULTRA-LOW MARKET CAP BUY!</b>\n`;
+              message += `• Market Cap: ${mcapFormatted}\n`;
+              message += `• ⚠️ <b>POSSIBLE FARMING</b> - Buying at very early stage to farm copy traders!\n`;
+            } else if (marketCapAnalysis.isLowMarketCap && marketCapAnalysis.historicalCount > 0) {
+              message += `\n⚠️ <b>LOW MARKET CAP BUY</b>\n`;
+              message += `• Market Cap: ${mcapFormatted}\n`;
+              if (marketCapAnalysis.avgMarketCap) {
+                message += `• Avg buy mcap: ${formatMarketCap(marketCapAnalysis.avgMarketCap)}\n`;
+                message += `• ${marketCapAnalysis.percentile.toFixed(0)}th percentile (lower than usual)\n`;
+              }
+              message += `• Possible farming behavior\n`;
+            } else if (marketCapAnalysis.historicalCount > 0 && marketCapAnalysis.avgMarketCap) {
+              // Show market cap context even if not suspicious
+              message += `\n📊 Market Cap: ${mcapFormatted}\n`;
+              message += `• ${marketCapAnalysis.percentile.toFixed(0)}th percentile vs historical buys\n`;
+            }
+          } else if (marketCap && hasBuys) {
+            // Show market cap if available but no analysis
+            message += `\n📊 Market Cap: ${formatMarketCap(marketCap)}\n`;
+          }
+          
           // Behavior deviations
           if (behaviorDeviations && behaviorDeviations.length > 0) {
             message += `\n🚨 <b>BEHAVIOR DEVIATION:</b>\n`;
@@ -1146,51 +1507,72 @@ async function checkKOLTransactions(bot) {
           message += `<a href="https://axiom.xyz/token/${tokenAddress}">AXIOM</a> | `;
           message += `<a href="https://dexscreener.com/solana/${tokenAddress}">DEX</a>`;
           
-          // Send alerts to all users tracking this KOL or token
-          let alertSent = false;
-          for (const [chatId, userPrefs] of Object.entries(users)) {
-            if (!userPrefs.subscribed) continue;
+          // For buys: queue for 1-minute delay (to filter out instant flips)
+          // For sells: send immediately
+          if (hasBuys && !hasSells) {
+            // Pure buy - queue for 1-minute delay
+            const alertKey = `${kolAddress}_${groupSwapInfo.tokenMint}_${groupSwapInfo.timestamp.getTime()}`;
+            pendingBuyAlerts.set(alertKey, {
+              kolAddress,
+              tokenMint: groupSwapInfo.tokenMint,
+              timestamp: groupSwapInfo.timestamp.getTime(),
+              message,
+              tokenInfo,
+              groupSignatures: group.signatures
+            });
+            console.log(`  ⏳ Buy alert queued (1-minute delay) for ${tokenName} ($${tokenSymbol})`);
             
-            const trackedKOLs = userPrefs.trackedKOLs || [];
-            const isTrackingKOL = trackedKOLs.includes(kolAddress);
-            const isTrackingToken = isTrackedToken(groupSwapInfo.tokenMint, userPrefs);
-            
-            const shouldAlert = isTrackingKOL || isTrackingToken || (kolCount >= 2 && groupSwapInfo.type === 'buy') || isGoodTokenAlert;
-            
-            if (shouldAlert) {
-              try {
-                // Send message with token image if available
-                if (tokenInfo && tokenInfo.imageUrl) {
-                  // Send photo with caption
-                  await bot.sendPhoto(chatId, tokenInfo.imageUrl, {
-                    caption: message,
-                    parse_mode: 'HTML',
-                    disable_web_page_preview: true
-                  });
-                } else {
-                  // Fallback to text-only message if no image
-                  await bot.sendMessage(chatId, message, {
-                    parse_mode: 'HTML',
-                    disable_web_page_preview: true
-                  });
+            // Mark transactions as alerted (so we don't re-process them)
+            for (const sig of group.signatures) {
+              await markTransactionAsAlerted(sig, kolAddress, groupSwapInfo.tokenMint);
+            }
+          } else {
+            // Sell or mixed - send immediately
+            let alertSent = false;
+            for (const [chatId, userPrefs] of Object.entries(users)) {
+              if (!userPrefs.subscribed) continue;
+              
+              const trackedKOLs = userPrefs.trackedKOLs || [];
+              const isTrackingKOL = trackedKOLs.includes(kolAddress);
+              const isTrackingToken = isTrackedToken(groupSwapInfo.tokenMint, userPrefs);
+              
+              const shouldAlert = isTrackingKOL || isTrackingToken || (kolCount >= 2 && groupSwapInfo.type === 'buy') || isGoodTokenAlert;
+              
+              if (shouldAlert) {
+                try {
+                  // Send message with token image if available
+                  if (tokenInfo && tokenInfo.imageUrl) {
+                    // Send photo with caption
+                    await bot.sendPhoto(chatId, tokenInfo.imageUrl, {
+                      caption: message,
+                      parse_mode: 'HTML',
+                      disable_web_page_preview: true
+                    });
+                  } else {
+                    // Fallback to text-only message if no image
+                    await bot.sendMessage(chatId, message, {
+                      parse_mode: 'HTML',
+                      disable_web_page_preview: true
+                    });
+                  }
+                  alertSent = true;
+                  
+                  // Mark all transactions in group as alerted
+                  for (const sig of group.signatures) {
+                    await markTransactionAsAlerted(sig, kolAddress, groupSwapInfo.tokenMint);
+                  }
+                  
+                  const alertType = isGrouped ? `${group.transactions.length} ${groupSwapInfo.type.toUpperCase()}S` : groupSwapInfo.type.toUpperCase();
+                  console.log(`  ✅ Sent grouped KOL alert to user ${chatId} for ${kolName}'s ${alertType} of ${tokenName} ($${tokenSymbol})`);
+                } catch (error) {
+                  console.error(`  ❌ Error sending KOL alert to ${chatId}:`, error.message);
                 }
-                alertSent = true;
-                
-                // Mark all transactions in group as alerted
-                for (const sig of group.signatures) {
-                  await markTransactionAsAlerted(sig, kolAddress, groupSwapInfo.tokenMint);
-                }
-                
-                const alertType = isGrouped ? `${group.transactions.length} ${groupSwapInfo.type.toUpperCase()}S` : groupSwapInfo.type.toUpperCase();
-                console.log(`  ✅ Sent grouped KOL alert to user ${chatId} for ${kolName}'s ${alertType} of ${tokenName} ($${tokenSymbol})`);
-              } catch (error) {
-                console.error(`  ❌ Error sending KOL alert to ${chatId}:`, error.message);
               }
             }
-          }
-          
-          if (!alertSent) {
-            console.log(`  ⚠️ Group detected but no users tracking this KOL or token`);
+            
+            if (!alertSent) {
+              console.log(`  ⚠️ Group detected but no users tracking this KOL or token`);
+            }
           }
         }
         

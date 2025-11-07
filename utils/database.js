@@ -116,10 +116,20 @@ async function initDatabase() {
         token_amount REAL,
         sol_amount REAL,
         token_price REAL,
+        market_cap REAL, -- Market cap at time of transaction
         timestamp BIGINT,
         created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW()) * 1000
       )
     `);
+    
+    // Add market_cap column if it doesn't exist (for existing databases)
+    try {
+      await pool.query(`
+        ALTER TABLE kol_transactions ADD COLUMN IF NOT EXISTS market_cap REAL
+      `);
+    } catch (error) {
+      // Column might already exist, ignore error
+    }
     
     // Create index for faster pattern queries
     await pool.query(`

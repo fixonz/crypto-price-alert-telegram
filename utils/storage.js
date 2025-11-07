@@ -694,7 +694,7 @@ async function updateUserPreferences(chatId, updates) {
 }
 
 // Save transaction to kol_transactions table for pattern analysis
-async function saveKOLTransaction(signature, kolAddress, tokenMint, transactionType, tokenAmount, solAmount, tokenPrice, timestamp) {
+async function saveKOLTransaction(signature, kolAddress, tokenMint, transactionType, tokenAmount, solAmount, tokenPrice, timestamp, marketCap = null) {
   await ensureDatabaseInitialized();
   if (db) {
     try {
@@ -704,13 +704,14 @@ async function saveKOLTransaction(signature, kolAddress, tokenMint, transactionT
       
       await pool.query(`
         INSERT INTO kol_transactions 
-        (signature, kol_address, token_mint, transaction_type, token_amount, sol_amount, token_price, timestamp)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (signature, kol_address, token_mint, transaction_type, token_amount, sol_amount, token_price, market_cap, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT(signature) DO UPDATE SET
           token_amount = EXCLUDED.token_amount,
           sol_amount = EXCLUDED.sol_amount,
-          token_price = EXCLUDED.token_price
-      `, [signature, kolAddress, tokenMint, transactionType, tokenAmount, solAmount, tokenPrice || null, timestamp]);
+          token_price = EXCLUDED.token_price,
+          market_cap = EXCLUDED.market_cap
+      `, [signature, kolAddress, tokenMint, transactionType, tokenAmount, solAmount, tokenPrice || null, marketCap, timestamp]);
       return;
     } catch (error) {
       console.error('Error saving KOL transaction:', error.message);
@@ -723,6 +724,7 @@ async function saveKOLTransaction(signature, kolAddress, tokenMint, transactionT
 }
 
 // Get transaction history for a KOL and token (for pattern analysis)
+// If tokenMint is null, returns all transactions for the KOL
 async function getKOLTransactionHistory(kolAddress, tokenMint, limit = 100) {
   await ensureDatabaseInitialized();
   if (db) {
@@ -731,12 +733,23 @@ async function getKOLTransactionHistory(kolAddress, tokenMint, limit = 100) {
       const pool = await getDatabase();
       if (!pool) throw new Error('Database not initialized');
       
-      const result = await pool.query(`
-        SELECT * FROM kol_transactions
-        WHERE kol_address = $1 AND token_mint = $2
-        ORDER BY timestamp DESC
-        LIMIT $3
-      `, [kolAddress, tokenMint, limit]);
+      let result;
+      if (tokenMint) {
+        result = await pool.query(`
+          SELECT * FROM kol_transactions
+          WHERE kol_address = $1 AND token_mint = $2
+          ORDER BY timestamp DESC
+          LIMIT $3
+        `, [kolAddress, tokenMint, limit]);
+      } else {
+        // Get all transactions for this KOL
+        result = await pool.query(`
+          SELECT * FROM kol_transactions
+          WHERE kol_address = $1
+          ORDER BY timestamp DESC
+          LIMIT $2
+        `, [kolAddress, limit]);
+      }
       
       return result.rows;
     } catch (error) {
