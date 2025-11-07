@@ -63,8 +63,19 @@ function parseSwapTransaction(tx, kolAddress) {
     // Helius Enhanced Transactions API format uses tokenTransfers and nativeTransfers
     const tokenTransfers = tx.tokenTransfers || [];
     const nativeTransfers = tx.nativeTransfers || [];
+    const events = tx.events || []; // Check for events that might contain swap amounts
     const timestamp = tx.timestamp ? new Date(tx.timestamp * 1000) : new Date();
     const description = tx.description || '';
+    
+    // Try to extract SOL amount from description (Helius sometimes includes this)
+    let solAmountFromDescription = null;
+    if (description) {
+      // Look for patterns like "for X SOL" or "X SOL" in description
+      const solMatch = description.match(/(\d+\.?\d*)\s*SOL/i);
+      if (solMatch) {
+        solAmountFromDescription = parseFloat(solMatch[1]);
+      }
+    }
     
     // Check transaction description for swap indicators (Helius often includes this)
     const isSwapDescription = description.toLowerCase().includes('swap') || 
@@ -84,6 +95,8 @@ function parseSwapTransaction(tx, kolAddress) {
     let solReceived = 0; // Track total SOL received (for sell PnL calculation)
     let solSent = 0; // Track total SOL sent (for debugging)
     let largestSolReceived = 0; // Track largest single SOL transfer received (likely the swap amount)
+    const significantSolReceived = []; // Track all significant SOL transfers received (> 0.01 SOL)
+    
     for (const transfer of nativeTransfers) {
       const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
       const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
@@ -100,8 +113,15 @@ function parseSwapTransaction(tx, kolAddress) {
         if (amount > largestSolReceived) {
           largestSolReceived = amount;
         }
+        // Track significant transfers (likely swap proceeds, not fees)
+        if (amount > 0.01) {
+          significantSolReceived.push(amount);
+        }
       }
     }
+    
+    // For sells, sum up all significant SOL received (swap might be split across multiple transfers)
+    const totalSignificantSolReceived = significantSolReceived.reduce((sum, amt) => sum + amt, 0);
 
     // Process token transfers - find transfers involving the KOL
     const tokenChanges = [];
@@ -162,17 +182,20 @@ function parseSwapTransaction(tx, kolAddress) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
-        // For sells, prefer largest SOL received (swap amount) over total received
-        // Fees are typically small (< 0.1 SOL), so largest transfer is likely the swap
-        // Fallback to total received if largest is suspiciously small
-        if (largestSolReceived > 0.1) {
+        // For sells, prioritize: description amount > totalSignificantSolReceived > largestSolReceived > solReceived > solChange
+        // Description amount is usually most accurate for Pump.fun swaps
+        if (solAmountFromDescription && solAmountFromDescription > 0.1) {
+          solAmount = solAmountFromDescription;
+        } else if (totalSignificantSolReceived > 0.1) {
+          solAmount = totalSignificantSolReceived;
+        } else if (largestSolReceived > 0.1) {
           solAmount = largestSolReceived;
-        } else if (solReceived > 0) {
+        } else if (solReceived > 0.1) {
           solAmount = solReceived;
         } else {
-          solAmount = solChange;
+          solAmount = solChange; // Fallback to net change
         }
-        console.log(`    💰 Sell SOL detection: largest=${largestSolReceived.toFixed(4)}, total=${solReceived.toFixed(4)}, net=${solChange.toFixed(4)}, using=${solAmount.toFixed(4)}`);
+        console.log(`    💰 Sell SOL detection: desc=${solAmountFromDescription || 'N/A'}, significant=${totalSignificantSolReceived.toFixed(4)}, largest=${largestSolReceived.toFixed(4)}, total=${solReceived.toFixed(4)}, net=${solChange.toFixed(4)}, using=${solAmount.toFixed(4)}`);
       }
       // Edge case: Both SOL and tokens going out - might be a sell with fees or wrapped SOL
       // If tokens are going out significantly, it's likely a sell (SOL might be wrapped differently)
@@ -184,8 +207,8 @@ function parseSwapTransaction(tx, kolAddress) {
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
         // For this edge case, if we have SOL received, use it; otherwise estimate from token amount
-        solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : Math.abs(solChange));
-        console.log(`    ⚠️ Sell detected (both SOL and tokens out): tokens=${amount.toFixed(2)}, SOL largest=${largestSolReceived.toFixed(4)}, SOL received=${solReceived.toFixed(4)}, SOL net=${solChange.toFixed(4)}`);
+        solAmount = totalSignificantSolReceived > 0.1 ? totalSignificantSolReceived : (largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : Math.abs(solChange)));
+        console.log(`    ⚠️ Sell detected (both SOL and tokens out): tokens=${amount.toFixed(2)}, SOL significant=${totalSignificantSolReceived.toFixed(4)}, SOL largest=${largestSolReceived.toFixed(4)}, SOL received=${solReceived.toFixed(4)}, SOL net=${solChange.toFixed(4)}`);
       }
       // Edge case: SOL comes in but token change is small (might be wrapped SOL or fees)
       // Check if description indicates a sell
@@ -195,7 +218,7 @@ function parseSwapTransaction(tx, kolAddress) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
-        solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : solChange);
+        solAmount = totalSignificantSolReceived > 0.1 ? totalSignificantSolReceived : (largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : solChange));
         console.log(`    ⚠️ Sell detected via description: ${description.substring(0, 50)}`);
       }
       
@@ -214,8 +237,8 @@ function parseSwapTransaction(tx, kolAddress) {
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
         // Prefer SOL received over net change for accurate PnL
-        solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : Math.abs(solChange));
-        console.log(`    ⚠️ Sell detected (large token out): ${amount.toFixed(2)} tokens, SOL largest=${largestSolReceived.toFixed(4)}, SOL received=${solReceived.toFixed(4)}, SOL net=${solChange.toFixed(4)}`);
+        solAmount = totalSignificantSolReceived > 0.1 ? totalSignificantSolReceived : (largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : Math.abs(solChange)));
+        console.log(`    ⚠️ Sell detected (large token out): ${amount.toFixed(2)} tokens, SOL significant=${totalSignificantSolReceived.toFixed(4)}, SOL largest=${largestSolReceived.toFixed(4)}, SOL received=${solReceived.toFixed(4)}, SOL net=${solChange.toFixed(4)}`);
       }
     }
     
@@ -236,7 +259,7 @@ function parseSwapTransaction(tx, kolAddress) {
             swapType = 'sell';
             tokenMint = mint;
             amount = parseFloat(transfer.tokenAmount || transfer.amount || 0);
-            solAmount = largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : solChange);
+            solAmount = totalSignificantSolReceived > 0.1 ? totalSignificantSolReceived : (largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : solChange));
             console.log(`    ⚠️ Sell detected via description fallback: token=${mint.substring(0, 8)}...`);
             break;
           }
@@ -304,8 +327,8 @@ function getKOLName(address) {
   return null;
 }
 
-// Group consecutive transactions of the same type within a timeframe
-// Groups transactions that are the same type (buy/sell), same token, and within GROUP_TIME_WINDOW_MS
+// Group transactions by token within a timeframe (includes both buys and sells)
+// Groups transactions for the same token within GROUP_TIME_WINDOW_MS, regardless of type
 function groupTransactions(parsedTransactions, groupTimeWindowMs = 120000) { // Default: 2 minutes
   if (parsedTransactions.length === 0) return [];
   
@@ -316,11 +339,11 @@ function groupTransactions(parsedTransactions, groupTimeWindowMs = 120000) { // 
     if (!tx.swapInfo) continue; // Skip non-swap transactions
     
     const txTime = tx.swapInfo.timestamp ? tx.swapInfo.timestamp.getTime() : Date.now();
-    const groupKey = `${tx.swapInfo.type}_${tx.swapInfo.tokenMint}`;
+    const groupKey = tx.swapInfo.tokenMint; // Group by token only, not by type
     
     // Start a new group if:
     // 1. No current group exists
-    // 2. Different type or token
+    // 2. Different token
     // 3. Time gap is too large
     if (!currentGroup || 
         currentGroup.key !== groupKey ||
@@ -334,22 +357,45 @@ function groupTransactions(parsedTransactions, groupTimeWindowMs = 120000) { // 
       // Start new group
       currentGroup = {
         key: groupKey,
-        type: tx.swapInfo.type,
         tokenMint: tx.swapInfo.tokenMint,
         transactions: [tx],
         firstTime: txTime,
         lastTime: txTime,
-        totalTokenAmount: tx.swapInfo.tokenAmount,
-        totalSolAmount: tx.swapInfo.solAmount,
+        buys: [],
+        sells: [],
+        totalBuyTokenAmount: 0,
+        totalSellTokenAmount: 0,
+        totalBuySolAmount: 0,
+        totalSellSolAmount: 0,
         signatures: [tx.swapInfo.signature]
       };
+      
+      // Add transaction to appropriate type array
+      if (tx.swapInfo.type === 'buy') {
+        currentGroup.buys.push(tx);
+        currentGroup.totalBuyTokenAmount += tx.swapInfo.tokenAmount;
+        currentGroup.totalBuySolAmount += tx.swapInfo.solAmount;
+      } else {
+        currentGroup.sells.push(tx);
+        currentGroup.totalSellTokenAmount += tx.swapInfo.tokenAmount;
+        currentGroup.totalSellSolAmount += tx.swapInfo.solAmount;
+      }
     } else {
       // Add to current group
       currentGroup.transactions.push(tx);
       currentGroup.lastTime = Math.max(currentGroup.lastTime, txTime);
-      currentGroup.totalTokenAmount += tx.swapInfo.tokenAmount;
-      currentGroup.totalSolAmount += tx.swapInfo.solAmount;
       currentGroup.signatures.push(tx.swapInfo.signature);
+      
+      // Add to appropriate type array
+      if (tx.swapInfo.type === 'buy') {
+        currentGroup.buys.push(tx);
+        currentGroup.totalBuyTokenAmount += tx.swapInfo.tokenAmount;
+        currentGroup.totalBuySolAmount += tx.swapInfo.solAmount;
+      } else {
+        currentGroup.sells.push(tx);
+        currentGroup.totalSellTokenAmount += tx.swapInfo.tokenAmount;
+        currentGroup.totalSellSolAmount += tx.swapInfo.solAmount;
+      }
     }
   }
   
@@ -505,7 +551,10 @@ async function checkKOLTransactions(bot) {
         // Step 3: Process each group
         for (const group of transactionGroups) {
           const isGrouped = group.transactions.length > 1;
-          console.log(`  📦 Processing group: ${group.type} ${group.transactions.length} tx(s) for token ${group.tokenMint.substring(0, 8)}...`);
+          const groupHasSells = group.sells.length > 0;
+          const groupHasBuys = group.buys.length > 0;
+          const groupType = groupHasSells ? 'sell' : 'buy';
+          console.log(`  📦 Processing group: ${groupHasBuys ? group.buys.length + ' buy(s)' : ''}${groupHasBuys && groupHasSells ? ' + ' : ''}${groupHasSells ? group.sells.length + ' sell(s)' : ''} for token ${group.tokenMint.substring(0, 8)}...`);
           
           // Process all transactions in the group sequentially (for balance tracking)
           // But collect data for a single aggregated alert
@@ -595,15 +644,28 @@ async function checkKOLTransactions(bot) {
             continue;
           }
           
+          // Determine primary action: if there are sells, prioritize sells; otherwise show buys
+          const hasSells = group.sells.length > 0;
+          const hasBuys = group.buys.length > 0;
+          const primaryType = hasSells ? 'sell' : 'buy';
+          const isMixed = hasSells && hasBuys;
+          
           // Get aggregated swap info from group
           const groupSwapInfo = {
-            type: group.type,
+            type: primaryType,
             tokenMint: group.tokenMint,
-            tokenAmount: group.totalTokenAmount,
-            solAmount: group.totalSolAmount,
+            tokenAmount: hasSells ? group.totalSellTokenAmount : group.totalBuyTokenAmount,
+            solAmount: hasSells ? group.totalSellSolAmount : group.totalBuySolAmount,
             signature: group.signatures[0], // Use first signature as primary
             signatures: group.signatures, // All signatures for links
-            timestamp: new Date(group.firstTime)
+            timestamp: new Date(group.firstTime),
+            isMixed: isMixed,
+            buyCount: group.buys.length,
+            sellCount: group.sells.length,
+            totalBuyTokenAmount: group.totalBuyTokenAmount,
+            totalSellTokenAmount: group.totalSellTokenAmount,
+            totalBuySolAmount: group.totalBuySolAmount,
+            totalSellSolAmount: group.totalSellSolAmount
           };
           
           // Get token info (name, symbol) - fetch once per group
@@ -831,11 +893,12 @@ async function checkKOLTransactions(bot) {
           // Build alert message
           const buyEmoji = '🟢';
           const sellEmoji = '🔴';
-          const actionEmoji = groupSwapInfo.type === 'buy' ? buyEmoji : sellEmoji;
+          // Use mixed emoji if both buys and sells
+          const actionEmoji = groupSwapInfo.isMixed ? '🔄' : (groupSwapInfo.type === 'buy' ? buyEmoji : sellEmoji);
           
           let message = '';
           
-          // First line: KOL NAME 🟢/🔴 $SYMBOL @ Mcap
+          // First line: KOL NAME 🟢/🔴/🔄 $SYMBOL @ Mcap
           if (marketCap && tokenPrice) {
             message += `<b>${kolName}</b> ${actionEmoji} <b>$${tokenSymbol}</b> @ ${formatMarketCap(marketCap)}\n`;
           } else {
@@ -843,15 +906,19 @@ async function checkKOLTransactions(bot) {
           }
           
           // Show grouped indicator if multiple transactions
-          if (isGrouped) {
-            message += `📦 <b>${group.transactions.length} transactions grouped</b>\n`;
+          if (isGrouped || groupSwapInfo.isMixed) {
+            const txCount = group.transactions.length;
+            const parts = [];
+            if (groupSwapInfo.buyCount > 0) parts.push(`${groupSwapInfo.buyCount} buy${groupSwapInfo.buyCount > 1 ? 's' : ''}`);
+            if (groupSwapInfo.sellCount > 0) parts.push(`${groupSwapInfo.sellCount} sell${groupSwapInfo.sellCount > 1 ? 's' : ''}`);
+            message += `📦 <b>${txCount} transaction${txCount > 1 ? 's' : ''} grouped</b> (${parts.join(' + ')})\n`;
           }
           
           // Timestamp
           message += `🕐 ${formattedTime}\n`;
           
           // Show other KOLs if multiple KOLs bought this token
-          if (kolCount >= 2 && groupSwapInfo.type === 'buy' && otherKOLs.length > 0) {
+          if (kolCount >= 2 && hasBuys && otherKOLs.length > 0) {
             message += `\n🔥 <b>${kolCount} KOLs</b> in this token:\n`;
             message += `• ${kolName}\n`;
             otherKOLs.forEach(otherKol => {
@@ -860,11 +927,19 @@ async function checkKOLTransactions(bot) {
             message += `\n`;
           }
           
-          // Amount tokens (aggregated)
-          message += `${formatTokenAmount(groupSwapInfo.tokenAmount)} tokens\n`;
-          
-          // SOL paid (aggregated)
-          message += `${groupSwapInfo.solAmount.toFixed(4)} SOL\n`;
+          // Show buys and sells separately if mixed
+          if (groupSwapInfo.isMixed) {
+            message += `\n<b>BUYS:</b>\n`;
+            message += `${formatTokenAmount(groupSwapInfo.totalBuyTokenAmount)} tokens\n`;
+            message += `${groupSwapInfo.totalBuySolAmount.toFixed(4)} SOL\n`;
+            message += `\n<b>SELLS:</b>\n`;
+            message += `${formatTokenAmount(groupSwapInfo.totalSellTokenAmount)} tokens\n`;
+            message += `${groupSwapInfo.totalSellSolAmount.toFixed(4)} SOL\n`;
+          } else {
+            // Single type transaction
+            message += `${formatTokenAmount(groupSwapInfo.tokenAmount)} tokens\n`;
+            message += `${groupSwapInfo.solAmount.toFixed(4)} SOL\n`;
+          }
           
           // HOLDS
           message += `\nHOLDS: `;
