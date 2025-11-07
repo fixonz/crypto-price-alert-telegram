@@ -64,6 +64,12 @@ function parseSwapTransaction(tx, kolAddress) {
     const tokenTransfers = tx.tokenTransfers || [];
     const nativeTransfers = tx.nativeTransfers || [];
     const timestamp = tx.timestamp ? new Date(tx.timestamp * 1000) : new Date();
+    const description = tx.description || '';
+    
+    // Check transaction description for swap indicators (Helius often includes this)
+    const isSwapDescription = description.toLowerCase().includes('swap') || 
+                              description.toLowerCase().includes('sell') ||
+                              description.toLowerCase().includes('buy');
 
     // If no transfers at all, skip
     if (tokenTransfers.length === 0 && nativeTransfers.length === 0) {
@@ -131,6 +137,7 @@ function parseSwapTransaction(tx, kolAddress) {
     // Find significant token changes (non-stablecoin tokens)
     const significantTokenChanges = tokenChanges.filter(change => Math.abs(change.change) > 0.000001);
     
+    // Improved detection: Check multiple scenarios
     if (significantTokenChanges.length > 0 && Math.abs(solChange) > 0.001) {
       const tokenChange = significantTokenChanges[0];
       
@@ -148,14 +155,50 @@ function parseSwapTransaction(tx, kolAddress) {
         amount = Math.abs(tokenChange.change);
         solAmount = solChange;
       }
+      // Edge case: SOL comes in but token change is small (might be wrapped SOL or fees)
+      // Check if description indicates a sell
+      else if (solChange > 0.001 && isSwapDescription && description.toLowerCase().includes('sell')) {
+        // Likely a sell but token transfer might be wrapped differently
+        // Use the first significant token change (even if small)
+        swapType = 'sell';
+        tokenMint = tokenChange.mint;
+        amount = Math.abs(tokenChange.change);
+        solAmount = solChange;
+        console.log(`    ⚠️ Sell detected via description: ${description.substring(0, 50)}`);
+      }
       
       // Enhanced logging for debugging sell detection
       if (Math.abs(solChange) > 0.001 && significantTokenChanges.length > 0) {
-        console.log(`    💰 Transaction analysis: SOL change=${solChange.toFixed(4)}, Token change=${tokenChange.change.toFixed(4)}, Type=${swapType || 'UNKNOWN'}`);
+        console.log(`    💰 Transaction analysis: SOL change=${solChange.toFixed(4)}, Token change=${tokenChange.change.toFixed(4)}, Type=${swapType || 'UNKNOWN'}, Desc="${description.substring(0, 40)}"`);
       }
-    } else if (Math.abs(solChange) > 0.001) {
+    } 
+    // Alternative detection: SOL comes in with swap description but no token transfers visible
+    // This might happen if tokens are burned or transferred differently
+    else if (solChange > 0.001 && isSwapDescription && description.toLowerCase().includes('sell')) {
+      // Try to find ANY token transfer (even if filtered out)
+      const allTokenTransfers = tx.tokenTransfers || [];
+      for (const transfer of allTokenTransfers) {
+        const from = (transfer.fromUserAccount || transfer.from || '').toLowerCase();
+        const mint = transfer.mint || transfer.tokenAddress;
+        if (from === kolAddressLower && mint) {
+          const mintLower = mint.toLowerCase();
+          // Skip SOL and stablecoins
+          if (!mintLower.includes('so11111111111111111111111111111111111111112') &&
+              !mintLower.includes('epjfwda5hvph1akvd2vndkrefmtwqxar3sqn7kl3ng') &&
+              !mintLower.includes('es9vfr6n3fmelq3q9hmkyfv8ycbkmahfsn3qycpc')) {
+            swapType = 'sell';
+            tokenMint = mint;
+            amount = parseFloat(transfer.tokenAmount || transfer.amount || 0);
+            solAmount = solChange;
+            console.log(`    ⚠️ Sell detected via description fallback: token=${mint.substring(0, 8)}...`);
+            break;
+          }
+        }
+      }
+    }
+    else if (Math.abs(solChange) > 0.001) {
       // Log when SOL changes but no token swap detected
-      console.log(`    ⚠️ SOL change detected (${solChange.toFixed(4)}) but no significant token change found`);
+      console.log(`    ⚠️ SOL change detected (${solChange.toFixed(4)}) but no significant token change found. Description: "${description.substring(0, 60)}"`);
     }
     
     if (swapType && tokenMint) {
@@ -331,9 +374,28 @@ async function checkKOLTransactions(bot) {
           console.log(`  🔍 Processing new transaction: ${signature.substring(0, 16)}...`);
           
           // Parse transaction
-          const swapInfo = parseSwapTransaction(tx, kolAddress);
+          let swapInfo = parseSwapTransaction(tx, kolAddress);
           
+          // If no swap detected but SOL came in, check if KOL had any tokens (balance-based sell detection)
           if (!swapInfo) {
+            // Check native transfers for SOL coming in
+            const nativeTransfers = tx.nativeTransfers || [];
+            let solReceived = 0;
+            const kolAddressLower = kolAddress.toLowerCase();
+            
+            for (const transfer of nativeTransfers) {
+              const to = (transfer.toUserAccount || transfer.to || '').toLowerCase();
+              if (to === kolAddressLower) {
+                solReceived += parseFloat(transfer.amount || 0) / 1e9;
+              }
+            }
+            
+            // If SOL came in (> 0.1 SOL to filter out fees), log for debugging
+            if (solReceived > 0.1) {
+              console.log(`  🔍 SOL received ${solReceived.toFixed(4)} but no swap detected. Description: "${(tx.description || '').substring(0, 60)}"`);
+              console.log(`    Token transfers: ${(tx.tokenTransfers || []).length}, Native transfers: ${nativeTransfers.length}`);
+            }
+            
             console.log(`  ⚠️ Transaction ${signature.substring(0, 16)}... is not a swap (no token changes detected)`);
           } else {
             console.log(`  ✅ Swap detected: ${swapInfo.type} ${swapInfo.tokenMint.substring(0, 8)}... (${swapInfo.tokenAmount} tokens, ${swapInfo.solAmount} SOL)`);
