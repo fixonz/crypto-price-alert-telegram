@@ -226,10 +226,16 @@ async function parseSwapTransaction(tx, kolAddress) {
     }
 
     // Helius Enhanced Transactions API format uses tokenTransfers and nativeTransfers
-    const tokenTransfers = tx.tokenTransfers || [];
-    const nativeTransfers = tx.nativeTransfers || [];
-    const events = tx.events || []; // Check for events that might contain swap amounts
-    const innerInstructions = tx.innerInstructions || tx.transaction?.meta?.innerInstructions || [];
+    const tokenTransfers = Array.isArray(tx.tokenTransfers) ? tx.tokenTransfers : [];
+    const nativeTransfers = Array.isArray(tx.nativeTransfers) ? tx.nativeTransfers : [];
+    // Ensure events is always an array (it might be an object or undefined)
+    const events = Array.isArray(tx.events) ? tx.events : [];
+    // Ensure innerInstructions is always an array
+    const innerInstructions = Array.isArray(tx.innerInstructions) 
+      ? tx.innerInstructions 
+      : (Array.isArray(tx.transaction?.meta?.innerInstructions) 
+          ? tx.transaction.meta.innerInstructions 
+          : []);
     const timestamp = tx.timestamp ? new Date(tx.timestamp * 1000) : new Date();
     const description = tx.description || '';
     
@@ -396,19 +402,28 @@ async function parseSwapTransaction(tx, kolAddress) {
     // Find significant token changes (non-stablecoin tokens)
     const significantTokenChanges = tokenChanges.filter(change => Math.abs(change.change) > 0.000001);
     
+    // Log transaction details for debugging
+    if (tokenTransfers.length > 0 || nativeTransfers.length > 0) {
+      console.log(`    🔍 Transaction has ${tokenTransfers.length} token transfer(s), ${nativeTransfers.length} native transfer(s), ${significantTokenChanges.length} significant token change(s), SOL change: ${solChange.toFixed(4)}`);
+    }
+    
     // Improved detection: Check multiple scenarios
-    if (significantTokenChanges.length > 0 && Math.abs(solChange) > 0.001) {
+    // Allow detection even if SOL change is small (might be wrapped SOL or fees handled differently)
+    if (significantTokenChanges.length > 0 && (Math.abs(solChange) > 0.001 || tokenTransfers.length > 0)) {
       const tokenChange = significantTokenChanges[0];
       
       // Buy: SOL goes out (negative), tokens come in (positive)
-      if (solChange < -0.001 && tokenChange.change > 0.000001) {
+      // Also check solSent in case solChange is small due to fees but actual SOL sent is significant
+      if ((solChange < -0.001 || solSent > 0.01) && tokenChange.change > 0.000001) {
         swapType = 'buy';
         tokenMint = tokenChange.mint;
         amount = tokenChange.change;
-        solAmount = Math.abs(solChange);
+        // Use SOL sent if available (more accurate), otherwise use net change
+        solAmount = solSent > 0.01 ? solSent : Math.abs(solChange);
       } 
       // Sell: SOL comes in (positive), tokens go out (negative)
-      else if (solChange > 0.001 && tokenChange.change < -0.000001) {
+      // Also check solReceived in case solChange is small due to fees but actual SOL received is significant
+      else if ((solChange > 0.001 || solReceived > 0.01) && tokenChange.change < -0.000001) {
         swapType = 'sell';
         tokenMint = tokenChange.mint;
         amount = Math.abs(tokenChange.change);
@@ -477,6 +492,33 @@ async function parseSwapTransaction(tx, kolAddress) {
         console.log(`    💰 Transaction analysis: SOL change=${solChange.toFixed(4)}, Token change=${tokenChange.change.toFixed(4)}, Type=${swapType || 'UNKNOWN'}, Desc="${description.substring(0, 40)}"`);
       }
     } 
+    // Fallback detection: If we have token transfers but SOL change is minimal or zero
+    // This handles wrapped SOL, different DEX formats, or complex swap patterns
+    if (!swapType && significantTokenChanges.length > 0 && tokenTransfers.length > 0) {
+      const tokenChange = significantTokenChanges[0];
+      console.log(`    🔄 Fallback detection: Token change=${tokenChange.change.toFixed(4)}, SOL change=${solChange.toFixed(4)}, checking description...`);
+      
+      // Check if description indicates a swap
+      if (isSwapDescription) {
+        // If tokens are going out and description says sell, it's a sell
+        if (tokenChange.change < -0.000001 && (description.toLowerCase().includes('sell') || description.toLowerCase().includes('swap'))) {
+          swapType = 'sell';
+          tokenMint = tokenChange.mint;
+          amount = Math.abs(tokenChange.change);
+          // Use SOL received if available, otherwise estimate from token amount
+          solAmount = totalSignificantSolReceived > 0.1 ? totalSignificantSolReceived : (largestSolReceived > 0.1 ? largestSolReceived : (solReceived > 0 ? solReceived : Math.abs(solChange)));
+          console.log(`    ✅ Sell detected via fallback: ${amount.toFixed(2)} tokens, SOL=${solAmount.toFixed(4)}`);
+        }
+        // If tokens are coming in and description says buy, it's a buy
+        else if (tokenChange.change > 0.000001 && (description.toLowerCase().includes('buy') || description.toLowerCase().includes('swap'))) {
+          swapType = 'buy';
+          tokenMint = tokenChange.mint;
+          amount = tokenChange.change;
+          solAmount = Math.abs(solChange) || (solSent > 0 ? solSent : 0.001); // Use SOL sent or minimum
+          console.log(`    ✅ Buy detected via fallback: ${amount.toFixed(2)} tokens, SOL=${solAmount.toFixed(4)}`);
+        }
+      }
+    }
     // Alternative detection: Large token amount going out (even if SOL also going out)
     // This handles cases where SOL fees are deducted separately
     if (!swapType && significantTokenChanges.length > 0) {
